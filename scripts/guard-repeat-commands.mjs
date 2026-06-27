@@ -19,7 +19,17 @@ import { readStdin, safeJsonParse } from './lib/hook-io.mjs';
 
 const OVERRIDE_VAR = 'SPECSMITH_GUARD_OVERRIDE';
 
-const EXPENSIVE_RE = /\b(npm (run )?(test|lint|typecheck|build)|pnpm (run )?(test|lint|typecheck|build)|yarn (test|lint|typecheck|build)|tsc(\s|$)|jest(\s|$)|vitest(\s|$)|playwright test|next build|prisma migrate|cargo (test|build)|go test|mvn |gradle)\b/;
+// The `(?<!show-)(?:pixel|dom)-diff\.mjs` clause catches the specsmith
+// design-diff scripts — pixel-diff.mjs / dom-diff.mjs and their project
+// `run-*` wrappers — which are the most expensive commands in a /build cycle
+// (a full-app pixel diff is ~2 min). They were NOT in this list, so an agent
+// could re-run the whole diff just to re-grep its own output with no edits in
+// between; an audit trace showed pixel-diff run back-to-back, 0 edits between,
+// ~130s wasted (the second run only changed the trailing `| tail` to `| grep`).
+// The negative lookbehind exempts `show-pixel-diff.mjs` / `show-dom-diff.mjs`,
+// the cheap JSON readers the agent SHOULD be using instead — blocking those
+// would push agents back toward re-running the real diff.
+const EXPENSIVE_RE = /\b(npm (run )?(test|lint|typecheck|build)|pnpm (run )?(test|lint|typecheck|build)|yarn (test|lint|typecheck|build)|tsc(\s|$)|jest(\s|$)|vitest(\s|$)|playwright test|next (lint|build)|prisma migrate|cargo (test|build)|go test|mvn |gradle|(?<!show-)(?:pixel|dom)-diff\.mjs)\b/;
 const STATE_WIPE_RE = /\brm\s+-rf?\s+\S*(pglite|\.next|node_modules|data\/)/;
 const STATE_WIPE_WINDOW_MS = 30 * 60 * 1000;
 const STATE_WIPE_THRESHOLD = 2; // i.e. this would be the 3rd
@@ -70,16 +80,20 @@ function unwrapShell(cmd) {
 }
 
 // Strip everything from the first ` | (grep|tail|head|...)` onward, any
-// trailing `; echo …` / `&& echo …` epilogue, and any leading env-var
+// trailing `; echo …` / `&& echo …` epilogue, any stream redirection
+// (`2>&1`, `> out.txt`, `2>/dev/null`, `>> log`), and any leading env-var
 // prefix (`SKIP_ENV=1 NODE_ENV=test <cmd>`). What's left is the "base" —
 // the part that actually does the work. Wrapped forms (`node -e "..."`,
-// `bash -c "..."`) are unwrapped first.
+// `bash -c "..."`) are unwrapped first. Redirections are stripped because
+// they are not "work": `pixel-diff.mjs` and `pixel-diff.mjs 2>&1` must
+// normalise to the same base, otherwise toggling `2>&1` dodges the guard.
 function baseCommand(cmd) {
   if (typeof cmd !== 'string') return '';
   let b = unwrapShell(cmd);
   b = b.replace(/^(?:\s*[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)+/, '');
   b = b.replace(/\s*\|\s*(grep|rg|awk|sed|head|tail|wc|jq|tee|cut|sort|uniq|less|more)\b.*$/, '');
   b = b.replace(/\s*(;|&&)\s*echo\b.*$/, '');
+  b = b.replace(/\s*\d*>>?\s*(?:&\d+|\S+)/g, '');
   return b.trim();
 }
 

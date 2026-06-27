@@ -4,6 +4,7 @@
 
 import assert from 'node:assert';
 import {
+  classifyFile,
   mapFileToRoute,
   mapFilesToRoutes,
   priorFailedRoutes,
@@ -167,6 +168,41 @@ test('mapFileToRoute: empty / non-string → null', () => {
   assert.strictEqual(mapFileToRoute(''), null);
   assert.strictEqual(mapFileToRoute(null), null);
   assert.strictEqual(mapFileToRoute(undefined), null);
+});
+
+// ─── classifyFile: the richer kind behind mapFileToRoute ──────────────
+
+test('classifyFile: page → kind route', () => {
+  assert.deepStrictEqual(classifyFile('src/app/dashboard/page.tsx'), { kind: 'route', route: '/dashboard' });
+});
+
+test('classifyFile: root layout → kind global (no trace)', () => {
+  assert.deepStrictEqual(classifyFile('app/layout.tsx'), { kind: 'global' });
+});
+
+test('classifyFile: tailwind config → kind global', () => {
+  assert.deepStrictEqual(classifyFile('tailwind.config.ts'), { kind: 'global' });
+});
+
+test('classifyFile: component → kind shared (traceable), carries path', () => {
+  assert.deepStrictEqual(classifyFile('src/components/Card.tsx'), { kind: 'shared', file: 'src/components/Card.tsx' });
+});
+
+test('classifyFile: lib helper → kind shared', () => {
+  assert.deepStrictEqual(classifyFile('src/lib/format.ts'), { kind: 'shared', file: 'src/lib/format.ts' });
+});
+
+test('classifyFile: unknown src/ file → kind shared (traceable, not hard global)', () => {
+  assert.deepStrictEqual(classifyFile('src/widgets/thing.ts'), { kind: 'shared', file: 'src/widgets/thing.ts' });
+});
+
+test('classifyFile: doc → kind irrelevant', () => {
+  assert.deepStrictEqual(classifyFile('README.md'), { kind: 'irrelevant' });
+});
+
+test('classifyFile: empty / non-string → kind irrelevant', () => {
+  assert.deepStrictEqual(classifyFile(''), { kind: 'irrelevant' });
+  assert.deepStrictEqual(classifyFile(null), { kind: 'irrelevant' });
 });
 
 // ─── mapFilesToRoutes ─────────────────────────────────────────────────

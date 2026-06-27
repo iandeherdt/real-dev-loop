@@ -241,5 +241,80 @@ function evt(ts, tool, extra = {}) {
   rmSync(cwd, { recursive: true, force: true });
 }
 
+// ── Case 16: re-run pixel-diff.mjs, no edits between → DENY ──
+// The design-diff scripts are the most expensive commands in a /build cycle
+// but were missing from EXPENSIVE_RE, so re-running one to re-grep its output
+// sailed through. (Audit: pixel-diff run twice back-to-back, 0 edits, ~130s.)
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node .claude/scripts/pixel-diff.mjs --out pipeline/feedback' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node .claude/scripts/pixel-diff.mjs --out pipeline/feedback 2>&1 | tail -60');
+  assert(r.status === 2, 'denies re-run of pixel-diff.mjs with no edits between');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 17: re-run a run-pixel-diff.mjs wrapper, different pipe → DENY ──
+// The exact pattern from the failing trace: same diff, `| tail` then `| grep`.
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node --env-file=.env.local scripts/run-pixel-diff.mjs --out pipeline/feedback 2>&1 | tail -60' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node --env-file=.env.local scripts/run-pixel-diff.mjs --out pipeline/feedback 2>&1 | grep -E \'"verdict"|"stuck"\'');
+  assert(r.status === 2, 'denies re-grep of run-pixel-diff.mjs wrapper output (base matches)');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 18: dom-diff.mjs re-run after an Edit → ALLOW ──
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node .claude/scripts/dom-diff.mjs --out pipeline/feedback' } }),
+    evt('2026-05-14T20:30:30.000Z', 'Edit', { input: { file_path: '/page.tsx' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node .claude/scripts/dom-diff.mjs --out pipeline/feedback');
+  assert(r.status === 0, 'allows dom-diff.mjs re-run after an Edit');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 19: show-pixel-diff.mjs is the cheap reader → ALLOW even if repeated ──
+// Blocking the helper would push agents back to re-running the real diff —
+// the opposite of what we want. The negative lookbehind exempts it.
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node .claude/scripts/show-pixel-diff.mjs' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node .claude/scripts/show-pixel-diff.mjs --routes-failed');
+  assert(r.status === 0, 'allows repeated show-pixel-diff.mjs (cheap JSON reader, not the diff)');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 20: cheap sibling scripts are NOT treated as expensive → ALLOW ──
+// pixel-diff-lib.mjs (pure helpers) and routes-to-diff.mjs (git + graph scan)
+// are cheap; only the actual pixel-diff.mjs/dom-diff.mjs runs are guarded.
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node .claude/scripts/routes-to-diff.mjs' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node .claude/scripts/routes-to-diff.mjs --verbose');
+  assert(r.status === 0, 'allows repeated routes-to-diff.mjs (cheap scope computation)');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 21: next lint re-run, no edits between → DENY ──
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'npx next lint --file app/page.tsx' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'npx next lint --file app/page.tsx 2>&1 | tail -20');
+  assert(r.status === 2, 'denies re-run of next lint with no edits between');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

@@ -4,21 +4,23 @@
 //   - "*" (on a single line) → test all routes; pass no --only-route flags
 //   - one route per line     → pass each as --only-route
 //
+// The scope decision itself lives in lib/diff-scope.mjs (shared with
+// pixel-diff/dom-diff, which now self-scope through the same brain). This
+// file is just the CLI wrapper: parse flags, print the result, narrate.
+//
 // Inputs (all read from disk, no args):
-//   - `git diff --name-only <base-ref>` + uncommitted (staged + unstaged)
-//     where <base-ref> is the merge-base of the current branch and main.
-//     (For a long-running feature branch, this captures every file the
-//     branch has touched, not just the latest commit.)
-//   - pipeline/feedback/pixel-diff.json (if exists) → failed routes
-//   - pipeline/feedback/dom-diff.json (if exists)   → failed routes
+//   - `git diff` against the merge-base of the current branch and <base>,
+//     plus staged + unstaged. Each changed file is classified; shared code
+//     (components/hooks/utils) is traced through the import graph to the
+//     routes that actually render it, instead of forcing a full sweep.
+//   - pipeline/feedback/pixel-diff.json + dom-diff.json → prior failed routes,
+//     always re-tested so a stuck route never drops out of coverage.
 //
 // Output policy:
-//   - Any global / shared-code change in the file diff → "*"
+//   - Hard-global change (root layout, theme tokens, build config) OR an
+//     untrustworthy import trace → "*"
 //   - Otherwise, union of (file-derived routes) ∪ (prior-failure routes)
 //   - Empty result (no relevant changes, no prior failures) → "*"
-//     The empty case happens on a fresh phase with no prior cycle and
-//     no app/* edits — fall back to running everything once to
-//     establish a baseline.
 //
 // Usage:
 //   ROUTES=$(node .claude/scripts/routes-to-diff.mjs)
@@ -36,18 +38,11 @@
 // Flags:
 //   --base <ref>    override the merge-base ref (default: main).
 //   --verbose       print the reasoning to stderr (which files mapped to
-//                   which routes, and which routes carried over from the
-//                   prior cycle).
+//                   which routes, what the import trace resolved, and which
+//                   routes carried over from the prior cycle).
 //   --no-prior      skip the prior-failure scan (useful for a clean baseline).
 
-import { execSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import {
-  mapFilesToRoutes,
-  priorFailedRoutes,
-  mergeScope,
-} from './routes-to-diff-lib.mjs';
+import { computeRouteScope } from './lib/diff-scope.mjs';
 
 const CWD = process.cwd();
 
@@ -69,85 +64,32 @@ function parseArgs(argv) {
   return out;
 }
 
-function runGit(args) {
-  try {
-    return execSync(`git ${args}`, { cwd: CWD, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch {
-    return null;
-  }
-}
-
-function changedFiles(baseRef) {
-  // Three sources:
-  //   - committed delta against the merge-base of HEAD and baseRef
-  //   - staged (index vs HEAD)
-  //   - unstaged (working tree vs index)
-  // Union deduped.
-  const all = new Set();
-
-  // merge-base diff
-  const mb = runGit(`merge-base HEAD ${baseRef}`);
-  if (mb) {
-    const sha = mb.trim();
-    const committed = runGit(`diff --name-only ${sha}..HEAD`);
-    if (committed) {
-      for (const line of committed.split('\n')) if (line) all.add(line);
-    }
-  } else {
-    // No merge-base resolvable (orphan branch, missing remote): fall back
-    // to "what's different from HEAD's parent". Last-cycle file scope is
-    // usually a superset of what we want anyway.
-    const committed = runGit('diff --name-only HEAD~1..HEAD');
-    if (committed) for (const line of committed.split('\n')) if (line) all.add(line);
-  }
-
-  const staged = runGit('diff --cached --name-only');
-  if (staged) for (const line of staged.split('\n')) if (line) all.add(line);
-
-  const unstaged = runGit('diff --name-only');
-  if (unstaged) for (const line of unstaged.split('\n')) if (line) all.add(line);
-
-  return Array.from(all);
-}
-
-function loadPayload(path) {
-  const abs = resolve(CWD, path);
-  if (!existsSync(abs)) return null;
-  try { return JSON.parse(readFileSync(abs, 'utf8')); } catch { return null; }
-}
-
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const files = changedFiles(args.base);
-  const fileRoutes = mapFilesToRoutes(files);
-
-  let priorRoutes = [];
-  if (args.includePrior) {
-    const pixel = loadPayload('pipeline/feedback/pixel-diff.json');
-    const dom = loadPayload('pipeline/feedback/dom-diff.json');
-    priorRoutes = priorFailedRoutes(pixel, dom);
-  }
-
-  const merged = mergeScope(fileRoutes, priorRoutes);
+  const { scope, files, priorRoutes, detail } = computeRouteScope({
+    cwd: CWD,
+    base: args.base,
+    includePrior: args.includePrior,
+  });
 
   if (args.verbose) {
-    process.stderr.write(`routes-to-diff: ${files.length} changed file(s) since merge-base with ${args.base}\n`);
-    if (files.length) {
-      for (const f of files) process.stderr.write(`  changed: ${f}\n`);
-    }
-    process.stderr.write(`  file-derived routes: ${fileRoutes.length ? fileRoutes.join(', ') : '(none)'}\n`);
-    process.stderr.write(`  prior-failure routes: ${priorRoutes.length ? priorRoutes.join(', ') : '(none)'}\n`);
-    process.stderr.write(`  merged scope: ${merged.length ? merged.join(', ') : '* (empty → fall back to test-all)'}\n`);
+    const w = (s) => process.stderr.write(s + '\n');
+    w(`routes-to-diff: ${files.length} changed file(s) since merge-base with ${args.base}`);
+    for (const f of files) w(`  changed: ${f}`);
+    w(`  direct route files: ${detail.routeRoutes.length ? detail.routeRoutes.join(', ') : '(none)'}`);
+    w(`  shared files traced: ${detail.sharedFiles.length ? detail.sharedFiles.join(', ') : '(none)'}`);
+    w(`  trace → routes: ${detail.tracedRoutes.length ? detail.tracedRoutes.join(', ') : '(none)'}` +
+      (detail.traceIncomplete ? ' [incomplete → test-all]' : ''));
+    if (detail.hasGlobal) w('  hard-global change present → test-all');
+    w(`  prior-failure routes: ${priorRoutes.length ? priorRoutes.join(', ') : '(none)'}`);
+    w(`  final scope: ${scope === '*' ? '* (test-all)' : scope.join(', ')}`);
   }
 
-  // Empty merged scope means: no relevant file changes AND no prior failures.
-  // That's the "fresh cycle, never tested anything" case → run everything.
-  if (merged.length === 0 || merged.includes('*')) {
+  if (scope === '*') {
     process.stdout.write('*\n');
     process.exit(0);
   }
-
-  for (const r of merged) process.stdout.write(r + '\n');
+  for (const r of scope) process.stdout.write(r + '\n');
 }
 
 main();

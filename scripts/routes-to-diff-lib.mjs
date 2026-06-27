@@ -71,36 +71,42 @@ function segmentsToRoute(segments) {
   return '/' + visible.join('/');
 }
 
-// Pure: given a single changed file path, return one of:
-//   - { route: '/foo' }      — that file affects exactly one route
-//   - { route: '*' }         — global / shared change; force "test all"
-//   - null                   — file is irrelevant (route.ts handler,
-//                              .md doc, test, etc.) — contributes nothing
-export function mapFileToRoute(filePath) {
-  if (typeof filePath !== 'string' || !filePath) return null;
+// Pure: classify a changed file into one of four kinds, the richer signal
+// behind mapFileToRoute. The CLI uses this to tell a *traceable shared*
+// change (a component/hook/util whose importers we can follow to a small
+// set of routes) apart from a *hard global* change (root layout, theme
+// tokens, build config) that genuinely forces a full sweep.
+//
+// Returns one of:
+//   { kind: 'route',      route: '/foo' }  — affects exactly that route
+//   { kind: 'global' }                     — hard test-all; nothing to trace
+//   { kind: 'shared',     file }           — shared code; trace its importers
+//   { kind: 'irrelevant' }                 — docs/tests/scratch; contributes nothing
+export function classifyFile(filePath) {
+  if (typeof filePath !== 'string' || !filePath) return { kind: 'irrelevant' };
   // Normalise leading ./ and stray slashes.
   const f = filePath.replace(/^\.\//, '').replace(/^\/+/, '');
 
   // Irrelevant kinds.
-  if (/\.test\.(?:tsx|jsx|ts|js)$/.test(f)) return null;
-  if (/\.stories\.(?:tsx|jsx|ts|js)$/.test(f)) return null;
-  if (f.startsWith('tests/') || f.startsWith('test/') || f.startsWith('__tests__/')) return null;
-  if (f.startsWith('specs/') || f.startsWith('docs/') || f.startsWith('pipeline/')) return null;
-  if (f.startsWith('.claude/') || f.startsWith('designs/')) return null;
+  if (/\.test\.(?:tsx|jsx|ts|js)$/.test(f)) return { kind: 'irrelevant' };
+  if (/\.stories\.(?:tsx|jsx|ts|js)$/.test(f)) return { kind: 'irrelevant' };
+  if (f.startsWith('tests/') || f.startsWith('test/') || f.startsWith('__tests__/')) return { kind: 'irrelevant' };
+  if (f.startsWith('specs/') || f.startsWith('docs/') || f.startsWith('pipeline/')) return { kind: 'irrelevant' };
+  if (f.startsWith('.claude/') || f.startsWith('designs/')) return { kind: 'irrelevant' };
   if (f.endsWith('.md') || f.endsWith('.mdx')) {
     // .mdx as content can be a Next.js page — fall through to the route REs.
-    if (!f.endsWith('.mdx')) return null;
+    if (!f.endsWith('.mdx')) return { kind: 'irrelevant' };
   }
 
-  // Global / build-config patterns.
+  // Global / build-config patterns — no useful per-route scope.
   for (const re of GLOBAL_PATTERNS) {
-    if (re.test(f)) return { route: STAR };
+    if (re.test(f)) return { kind: 'global' };
   }
 
   // App-router page file → exact route. The captured group is undefined
   // when matching the root `app/page.tsx`, in which case the route is `/`.
   const appMatch = f.match(APP_ROUTE_RE);
-  if (appMatch) return { route: segmentsToRoute(appMatch[1] || '') };
+  if (appMatch) return { kind: 'route', route: segmentsToRoute(appMatch[1] || '') };
 
   // Pages-router file → exact route.
   const pagesMatch = f.match(PAGES_ROUTE_RE);
@@ -108,7 +114,7 @@ export function mapFileToRoute(filePath) {
     const segments = pagesMatch[1];
     // pages/index → /, pages/foo/index → /foo
     const cleaned = segments.replace(/\/?index$/, '') || '';
-    return { route: cleaned ? '/' + cleaned : '/' };
+    return { kind: 'route', route: cleaned ? '/' + cleaned : '/' };
   }
 
   // App-router layout / template / loading / error files: scope to the
@@ -116,27 +122,46 @@ export function mapFileToRoute(filePath) {
   // change affects /dashboard (and its children), not the whole app.
   const APP_SUBFILE_RE = /^(?:src\/)?app\/(.*?)\/(layout|template|loading|error|not-found)\.(?:tsx|jsx|ts|js)$/;
   const subMatch = f.match(APP_SUBFILE_RE);
-  if (subMatch) return { route: segmentsToRoute(subMatch[1]) };
+  if (subMatch) return { kind: 'route', route: segmentsToRoute(subMatch[1]) };
 
   // Route handlers (route.ts) don't render — but they back data. Conservative:
   // scope to the parent route, not "*", since a data-fetch change tends to
   // show in one route's UI.
   const APP_ROUTE_HANDLER_RE = /^(?:src\/)?app\/(.*?)\/route\.(?:ts|js)$/;
   const handlerMatch = f.match(APP_ROUTE_HANDLER_RE);
-  if (handlerMatch) return { route: segmentsToRoute(handlerMatch[1]) };
+  if (handlerMatch) return { kind: 'route', route: segmentsToRoute(handlerMatch[1]) };
 
-  // Shared code anywhere — conservative "*".
+  // Shared code (components/lib/hooks/utils) — not pinned to one route, but
+  // its importers CAN be traced to the routes that render it. Hand back the
+  // normalised path so the caller can feed the import-graph tracer.
   for (const re of SHARED_CODE_PATTERNS) {
-    if (re.test(f)) return { route: STAR };
+    if (re.test(f)) return { kind: 'shared', file: f };
   }
 
-  // Anything else under src/ or app/ that we don't recognise — conservative.
+  // Anything else under src/, app/ or pages/ that we don't recognise —
+  // treat as shared/traceable rather than a hard global. If the tracer can't
+  // place it, it degrades to test-all anyway.
   if (f.startsWith('src/') || f.startsWith('app/') || f.startsWith('pages/')) {
-    return { route: STAR };
+    return { kind: 'shared', file: f };
   }
 
   // Other top-level files: env, github actions, eslint configs, README,
   // etc. Don't affect the rendered output.
+  return { kind: 'irrelevant' };
+}
+
+// Pure: given a single changed file path, return one of:
+//   - { route: '/foo' }      — that file affects exactly one route
+//   - { route: '*' }         — global / shared change; force "test all"
+//   - null                   — file is irrelevant (route.ts handler,
+//                              .md doc, test, etc.) — contributes nothing
+// This is the path-only API: it has no project tree to trace importers
+// against, so shared code conservatively collapses to "*". The CLI uses
+// classifyFile + the import-graph tracer for the narrower answer.
+export function mapFileToRoute(filePath) {
+  const c = classifyFile(filePath);
+  if (c.kind === 'route') return { route: c.route };
+  if (c.kind === 'global' || c.kind === 'shared') return { route: STAR };
   return null;
 }
 

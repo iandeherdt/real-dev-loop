@@ -1,12 +1,12 @@
 {
   "name": "specsmith",
-  "version": "0.25.1",
+  "version": "0.26.0",
   "description": "Claude Code skills, agents, and scripts that drive an end-to-end development workflow: grill the idea, write a PRD, plan it, decompose into tasks, then design + build with Playwright-MCP-driven evaluation.",
   "bin": {
     "specsmith": "bin/cli.mjs"
   },
   "scripts": {
-    "test": "node tests/guard-repeat-commands.test.mjs && node tests/check-conventions.test.mjs && node tests/pixel-diff.test.mjs && node tests/guard-scope.test.mjs && node tests/dom-diff.test.mjs && node tests/guard-orchestrator-discipline.test.mjs && node tests/routes-to-diff.test.mjs"
+    "test": "node tests/guard-repeat-commands.test.mjs && node tests/check-conventions.test.mjs && node tests/pixel-diff.test.mjs && node tests/guard-scope.test.mjs && node tests/dom-diff.test.mjs && node tests/guard-orchestrator-discipline.test.mjs && node tests/routes-to-diff.test.mjs && node tests/import-graph.test.mjs"
   },
   "files": [
     "bin",

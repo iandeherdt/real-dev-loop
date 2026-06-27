@@ -376,10 +376,18 @@ If `designs/coverage.md` exists (written by the designing-interfaces agent), use
    ```
 2. **Run BOTH design-fidelity diffs in parallel** (primary path). Each writes its JSON to disk independently — they read the same dev server but write to different output files, so parallelisation is safe and ~halves the wall-time. Per-route progress prints to stderr as `[i/N] /route → verdict (...)` so you can see it making progress (or catch a hung route immediately, no more silent 5-minute waits).
 
-   **Since v0.20.0**, the diff is *scoped to what this cycle changed* by default — running pixel-diff + dom-diff against 20 routes when the developer only touched `/dashboard` is wasted work. The `routes-to-diff.mjs` helper inspects the git diff (against the merge-base with `main`) and the prior cycle's failed routes, then prints either `*` (test all) or one route per line. Drive both scripts through it:
+   The diff is *scoped to what this cycle changed* by default — running pixel-diff + dom-diff against 20 routes when the developer only touched `/dashboard` is wasted work. **Scoping is now built into the diff scripts themselves**: called with neither `--only-route` nor `--all`, each self-scopes via the same logic as `routes-to-diff.mjs`, so even a thin project wrapper (one that adds `--env-file`, storage-state, etc.) inherits change-scoping and can't silently sweep the whole app. The simplest correct invocation is therefore just:
 
    ```bash
-   ROUTES=$(node .claude/scripts/routes-to-diff.mjs)
+   node .claude/scripts/pixel-diff.mjs --out pipeline/feedback &
+   node .claude/scripts/dom-diff.mjs   --out pipeline/feedback &
+   wait
+   ```
+
+   You can still drive them explicitly through `routes-to-diff.mjs` (e.g. to inspect or log the scope) — when you pass `--only-route` flags the scripts use exactly those and skip self-scoping:
+
+   ```bash
+   ROUTES=$(node .claude/scripts/routes-to-diff.mjs --verbose)
    FLAGS=""
    if [ "$ROUTES" != "*" ]; then
      while IFS= read -r r; do FLAGS="$FLAGS --only-route $r"; done <<< "$ROUTES"
@@ -389,9 +397,9 @@ If `designs/coverage.md` exists (written by the designing-interfaces agent), use
    wait
    ```
 
-   The helper's policy is conservative: any change to a shared component, lib, hook, global CSS, theme tokens, or build config falls back to `*`. Only edits to specific `app/<segment>/page.tsx`, `pages/<segment>.tsx`, or that segment's `layout|loading|error|route` files produce a scoped list. **Prior-cycle failed routes are always included regardless of file changes** — a stuck route MUST be re-verified each cycle until it passes, otherwise it silently drops out of coverage. The output JSON gets `"scoped": true` and `"scoped_routes": [...]` so you can tell at a glance whether you ran a partial sweep.
+   The scope policy: a changed `app/<segment>/page.tsx`, `pages/<segment>.tsx`, or that segment's `layout|loading|error|route` file scopes to that route. A changed **shared component / lib / hook / util is traced through the import graph** to the routes whose page/layout closures actually import it — so a component edit re-diffs just the pages that render it, not the whole app. Only a *hard global* change (root layout, `globals.css`, theme tokens, Tailwind/PostCSS/Next config, lockfiles) — or an import the tracer can't resolve (dynamic `import(var)`, a path outside the source roots) — falls back to `*`. **Prior-cycle failed routes are always included regardless of file changes** — a stuck route MUST be re-verified each cycle until it passes, otherwise it silently drops out of coverage. The output JSON gets `"scoped": true` and `"scoped_routes": [...]` (plus `"self_scoped": true` when the script scoped itself) so you can tell at a glance whether you ran a partial sweep.
 
-   To force a full sweep (e.g. you suspect the scope rule missed something), pass no `--only-route` flags — i.e. call pixel-diff/dom-diff directly without the helper. To skip prior-failure carry-forward (clean baseline): `routes-to-diff.mjs --no-prior`.
+   To force a full sweep (e.g. you suspect the scope rule missed something), pass `--all` to pixel-diff/dom-diff. To skip prior-failure carry-forward (clean baseline): `routes-to-diff.mjs --no-prior`.
 
    Each subprocess's stderr is interleaved in the terminal — that's the desired output. Their exit codes don't propagate through `wait` automatically; if you need to branch on verdict, read the JSON files via the `show-*` helpers below. Do NOT capture stdout into a shell variable and parse it inline.
    These are **complementary**, not interchangeable:

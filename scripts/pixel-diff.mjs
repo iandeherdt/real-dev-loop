@@ -29,6 +29,7 @@ import {
   bucketDiffPixels,
 } from './pixel-diff-lib.mjs';
 import { parseViewport, readUrlFile, discoverDesignRoutes, emit } from './lib/diff-io.mjs';
+import { computeRouteScope } from './lib/diff-scope.mjs';
 
 // Re-export the pure helpers so existing test code and external callers
 // that `import { ... } from './pixel-diff.mjs'` keep working. New code can
@@ -75,24 +76,30 @@ const DEFAULTS = {
 };
 
 function parseArgs(argv) {
-  const out = { outDir: DEFAULT_OUT_DIR, routesOverride: null, storageStatePath: null, onlyRoutes: [] };
+  const out = { outDir: DEFAULT_OUT_DIR, routesOverride: null, storageStatePath: null, onlyRoutes: [], all: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--out') out.outDir = resolve(CWD, argv[++i]);
     else if (a === '--routes') out.routesOverride = JSON.parse(argv[++i]);
     else if (a === '--storage-state') out.storageStatePath = resolve(CWD, argv[++i]);
     else if (a === '--only-route') out.onlyRoutes.push(argv[++i]);
+    else if (a === '--all') out.all = true;
     else if (a === '-h' || a === '--help') {
       process.stdout.write(
         'pixel-diff: visual regression check vs designs/<slug>.html prototypes\n' +
         'Usage: pixel-diff.mjs [--out <dir>] [--routes <json>] [--storage-state <path>]\n' +
-        '                     [--only-route <route> [--only-route <route> ...]]\n' +
+        '                     [--only-route <route> ...] [--all]\n' +
         'Config: .claude/conventions.json -> pixelDiff block\n' +
         '  --storage-state <path>  Playwright storageState JSON; applied only\n' +
         '                          to the actual-side screenshot. Overrides\n' +
         '                          pixelDiff.storageStatePath if both set.\n' +
         '  --only-route <route>    Restrict to specific routes (repeatable).\n' +
-        '                          Typically piped from routes-to-diff.mjs.\n'
+        '                          Typically piped from routes-to-diff.mjs.\n' +
+        '  --all                   Diff every route, skipping the default\n' +
+        '                          change-scoping. Use for a full sweep.\n' +
+        '\n' +
+        'By default (no --only-route / --all) the script self-scopes to the\n' +
+        'routes this cycle changed, via the same logic as routes-to-diff.mjs.\n'
       );
       process.exit(0);
     }
@@ -281,16 +288,36 @@ async function main() {
   }
 
   let routes = args.routesOverride ?? cfg.routes ?? discoverDesignRoutes(CWD);
+
+  // Resolve the effective route scope. Precedence:
+  //   --all                → diff everything (explicit full sweep)
+  //   --only-route X …     → exactly those (explicit; typically from
+  //                          routes-to-diff.mjs upstream)
+  //   neither              → self-scope to this cycle's changed routes, so a
+  //                          thin env wrapper that calls pixel-diff directly
+  //                          still gets change-scoping. '*' → diff everything.
+  let onlyRoutes = args.onlyRoutes;
+  let selfScoped = false;
+  if (!args.all && (!onlyRoutes || !onlyRoutes.length)) {
+    try {
+      const { scope } = computeRouteScope({ cwd: CWD, base: 'main' });
+      if (scope !== '*') { onlyRoutes = scope; selfScoped = true; }
+    } catch { /* fall back to full sweep on any scope-computation error */ }
+  }
+
   let scoped = false;
-  if (args.onlyRoutes && args.onlyRoutes.length) {
-    const allow = new Set(args.onlyRoutes);
+  if (onlyRoutes && onlyRoutes.length) {
+    const allow = new Set(onlyRoutes);
     routes = routes.filter((r) => allow.has(r.route));
     scoped = true;
     if (!routes.length) {
       emit({
         verdict: 'skip',
-        reason: `no configured routes match --only-route filter ${JSON.stringify(args.onlyRoutes)}`,
+        reason: selfScoped
+          ? `no design/route pairs affected by this cycle's changes (self-scoped to ${JSON.stringify(onlyRoutes)}). Nothing for pixel-diff to verify.`
+          : `no configured routes match --only-route filter ${JSON.stringify(onlyRoutes)}`,
         scoped: true,
+        ...(selfScoped ? { self_scoped: true } : {}),
       }, 0);
     }
   }
@@ -351,7 +378,7 @@ async function main() {
   const payload = {
     verdict,
     summary,
-    ...(scoped ? { scoped: true, scoped_routes: args.onlyRoutes } : {}),
+    ...(scoped ? { scoped: true, scoped_routes: onlyRoutes, ...(selfScoped ? { self_scoped: true } : {}) } : {}),
     ...(stuckInfo.allStuck
       ? {
           stuck: true,
