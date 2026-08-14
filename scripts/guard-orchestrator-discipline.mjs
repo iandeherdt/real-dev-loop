@@ -24,14 +24,35 @@
 // (i.e. inside a /build run). Manual sessions where a human is iterating
 // on the dev server directly are not blocked.
 
-import { existsSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
 import { readStdin, safeJsonParse, toRelPosix } from './lib/hook-io.mjs';
 
 const RUN_STATE_FILE = 'pipeline/run-state.md';
 const DISPATCH_LOCK_FILE = 'pipeline/dispatch-active.txt';
 const DISPATCH_LOCK_TTL_MS = 30 * 60 * 1000; // 30 minutes — long enough for slow subagents, short enough to expire stale locks
 const PROTECTED_TOOLS = new Set(['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+// Opening the lock is now this hook's job, not the orchestrator's. The skill
+// used to instruct a `printf … > dispatch-active.txt` before every Agent call
+// and an `rm -f` after — 40 Bash calls of pure ceremony in one audited run,
+// two extra round-trips per dispatch, and a lock the orchestrator could
+// simply forget to open (whereupon the subagent's first legitimate tool call
+// was refused and blamed on the orchestrator). The hook sees every Agent
+// dispatch anyway, so it can do this itself and cannot forget.
+// trace-hook.mjs clears the lock on SubagentStop; the TTL remains the
+// backstop for a crashed run.
+function openDispatchLock(cwd, payload) {
+  const path = resolve(cwd, DISPATCH_LOCK_FILE);
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const type = payload.tool_input?.subagent_type || 'subagent';
+    writeFileSync(path, `${new Date().toISOString()} ${type}\n`);
+  } catch {
+    // Best-effort. A failure here degrades to the old behaviour: the
+    // subagent's first protected call is refused with a clear message.
+  }
+}
 
 // Bash commands the orchestrator must not run directly. Subagents (developer
 // + evaluator) ARE allowed to run these — that's their job. We only block
@@ -148,9 +169,16 @@ function main() {
   if (!raw) process.exit(0);
   const payload = safeJsonParse(raw);
   if (!payload || payload.hook_event_name !== 'PreToolUse') process.exit(0);
-  if (!PROTECTED_TOOLS.has(payload.tool_name)) process.exit(0);
 
   const cwd = payload.cwd || process.cwd();
+
+  // An Agent dispatch opens the lock automatically, then passes through.
+  if (payload.tool_name === 'Agent') {
+    if (isInBuildRun(cwd)) openDispatchLock(cwd, payload);
+    process.exit(0);
+  }
+
+  if (!PROTECTED_TOOLS.has(payload.tool_name)) process.exit(0);
 
   // Only enforce inside an active /build run. Manual experimentation
   // outside a build run is allowed.

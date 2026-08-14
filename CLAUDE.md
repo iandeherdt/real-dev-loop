@@ -62,7 +62,8 @@ The skills implement a five-stage pipeline. Each feature gets its own git branch
 │   └── utils.mjs          # PACKAGE_ROOT, install plan walker, log helpers
 ├── agents/                # Claude Code subagent definitions (.md files)
 ├── skills/                # one folder per skill; some bundle templates/
-├── scripts/               # trace-hook, env-facts, dev-server, etc. — installed to .claude/scripts/
+├── scripts/               # trace-hook, guards, run-gate, env-facts, dev-server — installed to .claude/scripts/
+├── references/            # progressive-disclosure docs agent files link to — installed to .claude/specsmith/references/
 ├── templates/             # constitution.md + glossary.md starters + claude-md-section.md
 ├── launch.json            # debug configurations merged into host's .claude/launch.json
 ├── package.json
@@ -78,6 +79,8 @@ The install plan is **dynamic**: `lib/utils.mjs#buildInstallPlan` walks `agents/
 - **Templates** for skills live under `skills/<name>/templates/<artifact>.md`. SKILL.md should *reference* the template ("Read `templates/foo.md`, then…") rather than inline it. This keeps SKILL.md short, lets templates be edited independently, and follows the progressive-disclosure pattern.
 - **Agents** are single `.md` files under `agents/` with subagent frontmatter (`name`, `description`). Single-responsibility, scoped tool allowlists.
 - **Scripts** are `.mjs` files under `scripts/`. Prefer adding a script over hardcoding shell into a skill or agent prompt. They install to `.claude/scripts/` and are invoked from there (e.g. `node .claude/scripts/trace-summarise.mjs`).
+- **References** are `.md` files under `references/`, installed to `.claude/specsmith/references/`. They hold progressive-disclosure content that an agent file links to by path rather than inlining — technique catalogues, language pitfalls, worked examples. They must NOT live under `agents/`: everything in `.claude/agents/` is loaded as a subagent definition, and `listAgents()` is non-recursive so they would not ship at all.
+- **Every documented anti-pattern ships with a mechanism, or it is a comment rather than a control.** Prose bans do not hold at scale: three files told agents to read `run-state.md` once and the next audited run read it 24 times, up from the 10 the instruction was written to prevent. The bans that hold are the ones promoted to a guard hook or absorbed into a helper script (`TRACE_JSONL_RE`, `run-gate.mjs`, `guard-repeat-reads.mjs`). When adding an anti-pattern to an agent file, add its enforcement in the same change.
 - **Top-level package files** (`launch.json`, `templates/constitution.md`, `templates/claude-md-section.md`) are merged into the host project, not copied verbatim — see `lib/merge.mjs`.
 - The PRD → plan → data-model → tasks artifacts produced by the pipeline are durable working documents during a project. Treat them as state, not scratch.
 

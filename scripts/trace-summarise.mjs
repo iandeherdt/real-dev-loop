@@ -112,7 +112,14 @@ function summarise(allEvents) {
       console.log(`  ${pad(tool, 32)} ${pad(n, 5)}${errPart}`);
     }
     if (pendingTotal > 0) {
-      console.log(`  (${pendingTotal} call(s) without a post event — interrupted or in flight)`);
+      console.log(
+        `  (${pendingTotal} call(s) without a post event — auto-backgrounded at the tool ` +
+        `timeout, interrupted, or still in flight)`
+      );
+      console.log(
+        '  Long gates should go through `run-gate.mjs`: it detaches the child, so a call ' +
+        'that\n  hits the timeout can be re-attached instead of re-run.'
+      );
     }
 
     // Repeat-call flailing detection: 5+ consecutive same-fingerprint calls.
@@ -145,12 +152,69 @@ function summarise(allEvents) {
       }
     }
 
+    // Unobservable calls — commands whose success/failure the trace could not
+    // determine because they filtered their own output (see trace-hook.mjs).
+    // Without this section a run with zero detected errors is ambiguous:
+    // it either went perfectly or was simply not observable. Say which.
+    const posts = events.filter((e) => e.event === 'tool_call' && e.phase === 'post');
+    const unobservable = posts.filter((e) => e.output?.unobservable).length;
+    if (unobservable > 0) {
+      const totalErrs = [...errors.values()].reduce((a, b) => a + b, 0);
+      const pct = Math.round((unobservable / posts.length) * 100);
+      console.log('');
+      console.log('Blind spots:');
+      console.log(
+        `  ${unobservable} of ${posts.length} tool results (${pct}%) could not be checked for failure —`
+      );
+      console.log(
+        '  the command piped its output to a filter, which discards the exit code.'
+      );
+      console.log(
+        `  ${totalErrs} error(s) were detected; an unknown number went unseen in the ${unobservable} above.`
+      );
+      console.log(
+        '  Route quality gates through `run-gate.mjs` — it preserves the exit code'
+      );
+      console.log('  and emits a SPECSMITH_GATE sentinel the trace can read.');
+    }
+
+    // User interventions. Only present once UserPromptSubmit is wired (it was
+    // missing from the installed hook set until v0.27.0), and the single most
+    // useful thing when reconstructing why a long run went the way it did.
+    const prompts = events.filter((e) => e.event === 'prompt');
+    if (prompts.length) {
+      console.log('');
+      console.log(`User prompts (${prompts.length}):`);
+      for (const p of prompts) {
+        const text = (p.prompt || '').replace(/\s+/g, ' ').slice(0, 100);
+        console.log(`  ${p.ts}  ${text}`);
+      }
+    }
+
     // Cycle markers — subagent_end / session_end events with token usage.
+    //
+    // Consecutive markers frequently carry byte-identical usage payloads:
+    // `transcript_path` at SubagentStop points at the SESSION transcript, so
+    // readUsageFromTranscript() re-reads whatever message was last rather than
+    // the subagent's own final message. Collapse those repeats — printing the
+    // same sample 11 times (as one audited run did) reads like activity.
     const stops = events.filter((e) => e.event === 'subagent_end' || e.event === 'session_end');
+    const samples = [];
+    let dupes = 0;
+    let prevKey = null;
+    for (const s of stops) {
+      const key = JSON.stringify(s.usage || null);
+      if (key !== 'null' && key === prevKey) { dupes++; continue; }
+      prevKey = key;
+      samples.push(s);
+    }
+
     if (stops.length) {
       console.log('');
-      console.log('Stop markers:');
-      for (const s of stops) {
+      console.log(
+        `Stop markers: ${stops.length}` + (dupes ? `  (${dupes} repeated sample(s) suppressed)` : '')
+      );
+      for (const s of samples) {
         const u = s.usage || {};
         const inTok = u.input_tokens ?? '?';
         const outTok = u.output_tokens ?? '?';
@@ -163,22 +227,32 @@ function summarise(allEvents) {
       }
     }
 
-    // High-level totals across the session.
-    const totals = stops.reduce(
-      (acc, s) => {
-        const u = s.usage || {};
-        acc.in += u.input_tokens || 0;
-        acc.out += u.output_tokens || 0;
-        acc.cacheR += u.cache_read_input_tokens || 0;
-        acc.cacheW += u.cache_creation_input_tokens || 0;
-        return acc;
-      },
-      { in: 0, out: 0, cacheR: 0, cacheW: 0 }
-    );
-    console.log('');
-    console.log(
-      `Token totals:  in=${totals.in}  out=${totals.out}  cache_read=${totals.cacheR}  cache_write=${totals.cacheW}`
-    );
+    // Token usage.
+    //
+    // These are SAMPLES of one request's usage taken at each stop marker, not
+    // a complete per-request series, and cache_read/cache_write grow with the
+    // conversation. Summing them across markers is meaningless — an audited
+    // run reported cache_read=19,509,503 for a session whose largest single
+    // sample was 400,177, an ~50x overstatement that made the digest useless
+    // for cost reasoning. Report what the samples actually support.
+    if (samples.length) {
+      const val = (s, k) => (s.usage || {})[k] || 0;
+      const last = samples[samples.length - 1];
+      const peakR = Math.max(...samples.map((s) => val(s, 'cache_read_input_tokens')));
+      const outSum = samples.reduce((a, s) => a + val(s, 'output_tokens'), 0);
+      console.log('');
+      console.log('Token usage (sampled at stop markers — not a billing total):');
+      console.log(
+        `  last sample:      in=${val(last, 'input_tokens')}  out=${val(last, 'output_tokens')}` +
+        `  cache_read=${val(last, 'cache_read_input_tokens')}  cache_write=${val(last, 'cache_creation_input_tokens')}`
+      );
+      console.log(`  peak cache_read:  ${peakR}   (largest context carried in one request)`);
+      console.log(`  output tokens across ${samples.length} distinct sample(s): ${outSum}`);
+      console.log(
+        '  cache_read/cache_write are per-request values that grow with the conversation;'
+      );
+      console.log('  they are not additive across markers, so no total is shown for them.');
+    }
   }
 }
 

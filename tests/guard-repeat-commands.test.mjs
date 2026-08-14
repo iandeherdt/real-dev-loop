@@ -316,5 +316,124 @@ function evt(ts, tool, extra = {}) {
   rmSync(cwd, { recursive: true, force: true });
 }
 
+// ── Cases 22-25: command forms taken verbatim from the 2026-08-13 /build
+// trace, all of which the guard used to wave through.
+//
+// EXPENSIVE_RE closed its alternation with a trailing `\b` while several
+// alternatives ended in `(\s|$)`. When such an alternative consumed the space
+// before a flag, `\b` landed between two non-word characters and could never
+// match. `npx tsc --noEmit` ran 49 times unguarded; the direct-binary vitest
+// form ran 122 times — the most-run command of that 15-hour session — and was
+// not matched by any alternative at all.
+
+// ── Case 22: direct-binary vitest re-run, no edits between → DENY ──
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node ./node_modules/vitest/dist/cli.js run 2>&1 | tee pipeline/traces/last-test.log | tail -80' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node ./node_modules/vitest/dist/cli.js run 2>&1 | tail -60');
+  assert(r.status === 2, 'denies re-run of node ./node_modules/vitest/dist/cli.js run');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 23: tsc followed by a flag re-run, no edits between → DENY ──
+// The exact regression: `tsc(\s|$)` + trailing `\b` made this test false.
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'SKIP_ENV_VALIDATION=1 npx tsc --noEmit 2>&1 | tail -60' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'SKIP_ENV_VALIDATION=1 npx tsc --noEmit 2>&1 | tee pipeline/traces/last-typecheck.log | tail -80');
+  assert(r.status === 2, 'denies re-run of npx tsc --noEmit (trailing-\\b regression)');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 24: direct-binary eslint re-run → DENY ──
+// `eslint` was not an alternative in EXPENSIVE_RE at all.
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node ./node_modules/eslint/bin/eslint.js src/lib/domain/settlement.ts' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node ./node_modules/eslint/bin/eslint.js src/lib/domain/settlement.ts 2>&1 | tail -30');
+  assert(r.status === 2, 'denies re-run of direct-binary eslint');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 25: prior run in `npx` form, re-run in direct-binary form → DENY ──
+// Cross-form normalisation: switching invocation style must not reset the guard.
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'npx vitest run tests/unit/settlement.test.ts' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node ./node_modules/.bin/vitest run tests/unit/settlement.test.ts');
+  assert(r.status === 2, 'denies vitest re-run when the invocation form changed');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 26: direct-binary vitest re-run AFTER an Edit → ALLOW ──
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node ./node_modules/vitest/dist/cli.js run' } }),
+    evt('2026-05-14T20:30:30.000Z', 'Edit', { input: { file_path: '/src/lib/domain/settlement.ts' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node ./node_modules/vitest/dist/cli.js run');
+  assert(r.status === 0, 'allows direct-binary vitest re-run after an Edit');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 27: a config file merely NAMED after a tool is not "expensive" ──
+// The bare-tool alternatives are anchored to a command position so that
+// reading `vitest.config.ts` twice is not mistaken for re-running vitest.
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'cat vitest.config.ts' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'cat vitest.config.ts');
+  assert(r.status === 0, 'allows repeated `cat vitest.config.ts` (not a tool invocation)');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 28: run-gate.mjs is exempt from the repeat rule ──
+// It fingerprints the tree and replays cached verdicts itself, and a bare
+// re-invocation re-attaches to a detached run. Denying these would push the
+// agent back to raw `npm test 2>&1 | tail`, which hides the exit code.
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node .claude/scripts/run-gate.mjs test -- npm test' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node .claude/scripts/run-gate.mjs test -- npm test');
+  assert(r.status === 0, 'allows a repeated run-gate.mjs call wrapping an expensive command');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 29: bare run-gate re-attach is always allowed ──
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'node .claude/scripts/run-gate.mjs test' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'node .claude/scripts/run-gate.mjs test');
+  assert(r.status === 0, 'allows a bare run-gate.mjs re-attach');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case 30: the raw form of the same gate is still guarded ──
+// The exemption must be for the wrapper, not a loophole for the command.
+{
+  const cwd = makeCwd();
+  writeTrace(cwd, 'abcd1234', [
+    evt('2026-05-14T20:30:00.000Z', 'Bash', { input: { command: 'npm test' } }),
+  ]);
+  const r = runHook(cwd, 'abcd1234', 'npm test 2>&1 | tail -40');
+  assert(r.status === 2, 'still denies the raw `npm test` re-run (exemption is wrapper-only)');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

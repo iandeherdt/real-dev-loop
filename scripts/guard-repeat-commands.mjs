@@ -29,7 +29,41 @@ const OVERRIDE_VAR = 'SPECSMITH_GUARD_OVERRIDE';
 // The negative lookbehind exempts `show-pixel-diff.mjs` / `show-dom-diff.mjs`,
 // the cheap JSON readers the agent SHOULD be using instead — blocking those
 // would push agents back toward re-running the real diff.
-const EXPENSIVE_RE = /\b(npm (run )?(test|lint|typecheck|build)|pnpm (run )?(test|lint|typecheck|build)|yarn (test|lint|typecheck|build)|tsc(\s|$)|jest(\s|$)|vitest(\s|$)|playwright test|next (lint|build)|prisma migrate|cargo (test|build)|go test|mvn |gradle|(?<!show-)(?:pixel|dom)-diff\.mjs)\b/;
+//
+// Terminator note: earlier versions wrote the alternatives as
+// `tsc(\s|$)|jest(\s|$)|vitest(\s|$)` inside a group closed by a trailing `\b`.
+// That combination can NEVER match when the tool is followed by a flag: the
+// alternative consumes the space, leaving `\b` to sit between " " and "-",
+// which are both non-word characters, so no boundary exists. Verified against
+// a real 15-hour /build trace — `npx tsc --noEmit` (49 calls) and
+// `node ./node_modules/vitest/dist/cli.js run` (122 calls, the single
+// most-run command of the session) both tested FALSE, so the repeat guard was
+// inert for the two most expensive command classes in the entire run. Use a
+// zero-width `(?![\w-])` terminator instead — it never consumes, so it cannot
+// create the same trap.
+//
+// Bare tool names (tsc/jest/vitest/eslint/...) are anchored to a command
+// position — start of the base, or just after `&&` / `;` / `|`. Without the
+// anchor, `cat vitest.config.ts` would read as "expensive". Direct-binary and
+// `npx` forms are collapsed onto the bare name by baseCommand() below, so the
+// anchor holds for every invocation style we've seen.
+const EXPENSIVE_TOOLS = 'tsc|jest|vitest|eslint|mocha|playwright test';
+const EXPENSIVE_RE = new RegExp(
+  [
+    `(?:^|&&\\s*|;\\s*|\\|\\s*)(?:${EXPENSIVE_TOOLS})(?![\\w./-])`,
+    '\\b(?:npm|pnpm) (?:run )?(?:test|lint|typecheck|build)(?![\\w-])',
+    '\\byarn (?:test|lint|typecheck|build)(?![\\w-])',
+    '\\bnext (?:lint|build)(?![\\w-])',
+    '\\bprisma migrate(?![\\w-])',
+    '\\bcargo (?:test|build)(?![\\w-])',
+    '\\bgo test(?![\\w-])',
+    '\\b(?:mvn|gradle)(?![\\w-])',
+    '(?<!show-)(?:pixel|dom)-diff\\.mjs',
+  ].join('|')
+);
+// The sanctioned gate wrapper — self-throttling, so Rule 1 stands down for it.
+const RUN_GATE_RE = /\brun-gate\.mjs\b/;
+
 const STATE_WIPE_RE = /\brm\s+-rf?\s+\S*(pglite|\.next|node_modules|data\/)/;
 const STATE_WIPE_WINDOW_MS = 30 * 60 * 1000;
 const STATE_WIPE_THRESHOLD = 2; // i.e. this would be the 3rd
@@ -87,10 +121,35 @@ function unwrapShell(cmd) {
 // `bash -c "..."`) are unwrapped first. Redirections are stripped because
 // they are not "work": `pixel-diff.mjs` and `pixel-diff.mjs 2>&1` must
 // normalise to the same base, otherwise toggling `2>&1` dodges the guard.
+// Collapse the many ways to invoke the same package binary onto one name, so
+// repeat detection compares like with like. `npx vitest run x`,
+// `node ./node_modules/vitest/dist/cli.js run x`, and
+// `./node_modules/.bin/vitest run x` are the same work; before this, they were
+// three different bases and a re-run in a different form was invisible to the
+// guard. The audited trace used the `dist/cli.js` form 122 times.
+function normaliseRunner(b) {
+  // `node_modules/.bin/<tool>` → `<tool>`. Must run before the package rule,
+  // whose `([\w@.-]+)` would otherwise capture `.bin` as the package name.
+  b = b.replace(/(?:^|(?<=\s))(?:\S*\/)?node_modules\/\.bin\/([\w@.-]+)/g, '$1');
+  // `node_modules/<pkg>/…/cli.js` or `node_modules/<pkg>/bin/<name>.js` → `<pkg>`.
+  b = b.replace(
+    /(?:^|(?<=\s))(?:\S*\/)?node_modules\/([\w@.-]+)\/[\w./-]*?(?:cli|bin\/[\w.-]+)\.[cm]?js/g,
+    '$1'
+  );
+  // Runner prefixes add nothing once the binary is named.
+  b = b.replace(/^(?:npx|pnpm\s+(?:exec|dlx)|yarn\s+dlx|bunx)\s+(?:--\S+\s+)*/, '');
+  // Strip a leading `node` ONLY when what follows is now a bare tool name.
+  // `node .claude/scripts/pixel-diff.mjs` keeps its `node` (the lookahead
+  // rejects tokens containing `/`), so existing bases are unchanged.
+  b = b.replace(/^node\s+(?:--\S+\s+)*(?=[\w@.-]+(?:\s|$))/, '');
+  return b;
+}
+
 function baseCommand(cmd) {
   if (typeof cmd !== 'string') return '';
   let b = unwrapShell(cmd);
   b = b.replace(/^(?:\s*[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)+/, '');
+  b = normaliseRunner(b);
   b = b.replace(/\s*\|\s*(grep|rg|awk|sed|head|tail|wc|jq|tee|cut|sort|uniq|less|more)\b.*$/, '');
   b = b.replace(/\s*(;|&&)\s*echo\b.*$/, '');
   b = b.replace(/\s*\d*>>?\s*(?:&\d+|\S+)/g, '');
@@ -205,8 +264,17 @@ function main() {
   const events = readTrace(tracePath);
 
   // Rule 1: re-running an expensive command with no edits in between.
+  //
+  // `run-gate.mjs` is exempt: it already refuses to redo work, and does it
+  // better than a denial can. It fingerprints the working tree and replays the
+  // previous verdict when nothing changed, and a bare re-invocation re-attaches
+  // to a detached run that is still in flight. Denying those calls would push
+  // the agent back toward raw `npm test 2>&1 | tail`, which is the shape that
+  // hides exit codes in the first place. Note the wrapped command appears
+  // inside the run-gate invocation (`run-gate.mjs test -- npm test`), so
+  // without this exemption EXPENSIVE_RE would match on the inner command.
   const base = baseCommand(cmd);
-  if (EXPENSIVE_RE.test(base)) {
+  if (EXPENSIVE_RE.test(base) && !RUN_GATE_RE.test(base)) {
     const { lastBaseAt, editsBetween } = analyseRepeat(events, base);
     if (lastBaseAt && editsBetween === 0) {
       const ageS = Math.max(0, Math.round((Date.now() - Date.parse(lastBaseAt)) / 1000));

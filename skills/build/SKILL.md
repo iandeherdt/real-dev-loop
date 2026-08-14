@@ -127,22 +127,11 @@ Skip this step when `UNCHECKED <= $SLICE_THRESHOLD`. The threshold is tunable pe
 
 Inside an active /build run the **`guard-orchestrator-discipline.mjs`** hook (installed by default since v0.19.0) refuses Bash invocations of dev/designs servers, `pixel-diff.mjs`, `dom-diff.mjs`, and the `run-*` wrappers from the orchestrator. It also refuses Edit/Write on `pipeline/dev-server-url` and `pipeline/designs-server-url`. The hook recognises a subagent context via a sentinel file: **`pipeline/dispatch-active.txt`**.
 
-For **every** Agent call you make (developer, evaluator, and any slice dispatch), wrap the call:
+**The lock manages itself — you do nothing.** The guard opens `pipeline/dispatch-active.txt` when it sees your `Agent` dispatch, and the trace hook removes it on `SubagentStop`. Do NOT write or delete that file by hand.
 
-```bash
-# Open the dispatch lock — tell the guard the next forbidden tool call
-# comes from a subagent, not from you.
-printf '%s\n' "$(date -u +%FT%TZ) ${SUBAGENT_TYPE}" > pipeline/dispatch-active.txt
-```
+Earlier versions asked the orchestrator to `printf` the sentinel before every Agent call and `rm -f` it after. That was 40 Bash calls of pure ceremony in one audited run — two extra round-trips per dispatch — and it could be forgotten, in which case the subagent's first legitimate tool call was refused and the message blamed the orchestrator. The hooks see every dispatch and every return anyway, so they own it now.
 
-…then invoke the Agent tool. After it returns:
-
-```bash
-# Close the lock so the orchestrator is bound by the rules again.
-rm -f pipeline/dispatch-active.txt
-```
-
-The lock has a 30-minute TTL inside the guard — long enough for a slow evaluator, short enough that a stale lock from a crashed run won't permanently disarm the guard. If you forget to open the lock, the subagent's first forbidden tool call is refused with a clear message that names you (the orchestrator) as the cause.
+The lock still has a 30-minute TTL inside the guard, as the backstop for a crashed run.
 
 You may run **read-only** helpers without opening the lock:
 
@@ -156,10 +145,30 @@ Do **not** wrap your own `node -e '...'` / `python3 -c '...'` / `perl -e '...'` 
 
 Call the Agent tool with `subagent_type: "developing-features"` and `model: "sonnet"`. The prompt MUST include:
 - Phase number, phase name, cycle number, spec branch
-- A pointer to `pipeline/run-state.md`
+- The **contents** of `pipeline/run-state.md` and `pipeline/environment-facts.md`, pasted inline as fenced markdown blocks (see below)
 - The phase block extracted in Step 0, as a fenced markdown block
 - On retries: the path to the prior cycle's feedback file
 - On retries: the **Carryovers list** copied verbatim from the prior cycle's feedback file, embedded as a fenced markdown block
+
+#### Paste the caches, don't point at them
+
+Paste the two cache files inline, exactly as you already do for the phase block:
+
+```
+## Run state (do not re-read pipeline/run-state.md)
+```
+[contents of pipeline/run-state.md]
+```
+
+## Environment facts (do not re-read pipeline/environment-facts.md)
+```
+[contents of pipeline/environment-facts.md]
+```
+```
+
+You hold both files in working memory already, so this costs you nothing and removes the subagent's reason to open them at all. Pointing at a path instead does not work: three separate files told agents to read these once and trust their context, and the run that followed read `run-state.md` 24 times and `environment-facts.md` 29 times — worse than the 10x/9x the instruction was written to prevent. The `guard-repeat-reads.mjs` hook now refuses the redundant reads outright; pasting the contents means the subagent never needs to try.
+
+The subagent still *writes* to `environment-facts.md` when it corrects or discovers a fact — only the read is eliminated. If a subagent reports a correction, re-read the file once before the next dispatch so the block you paste stays accurate.
 
 #### Carryover extraction (retries only)
 
@@ -205,13 +214,22 @@ Call the Agent tool with `subagent_type: "evaluating-phases"` and `model: "sonne
 ```
 Evaluate Phase [N] (<phase name>), Cycle [C].
 Spec branch: specs/<latest-branch>/
-Run state: pipeline/run-state.md
 Procedures (login etc.): pipeline/procedures.md
 Write feedback to: pipeline/feedback/phase-[N]-cycle-[C].md
 
 Phase block (do not re-read tasks.md):
 ```
 [paste the phase block here]
+```
+
+Run state (do not re-read pipeline/run-state.md):
+```
+[paste the contents of pipeline/run-state.md here]
+```
+
+Environment facts (do not re-read pipeline/environment-facts.md):
+```
+[paste the contents of pipeline/environment-facts.md here]
 ```
 ```
 

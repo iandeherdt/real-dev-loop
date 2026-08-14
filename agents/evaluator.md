@@ -30,14 +30,22 @@ If the browser tools fail to load or the server won't start, **STOP and report t
 
 ## Do not re-validate run state
 
-The build orchestrator writes `pipeline/run-state.md` at the start of the
-run. It contains the spec branch, the phase in scope, whether `designs/`
-exists, and the constitution path. Read that file first.
+The build orchestrator pastes the contents of `pipeline/run-state.md` and
+`pipeline/environment-facts.md` **inline in your prompt**. They are already
+in your context — do not open either file. It contains the spec branch, the
+phase in scope, whether `designs/` exists, and the constitution path.
+
+(If a prompt ever omits them, read each file once and continue.)
 
 Do NOT run `ls`, `find`, `test -f`, or `cat` against `specs/` or
 `designs/` to confirm facts the run-state file already provides.
 Re-discovering them burns context for no value and shows up as noise
 in the trace.
+
+The `guard-repeat-reads.mjs` hook refuses a second Read of a file nothing has
+edited since your first, so re-reading is not merely discouraged — it fails.
+The guard stands down after any edit, after a Bash command that names the
+file, and for a different offset/limit window.
 
 This is in addition to — not a replacement for — the Environment Facts
 cache below, which covers shell *commands*. Run-state covers *which run
@@ -304,23 +312,14 @@ If `<spec-branch>/prd.md` does not exist at the path passed by the orchestrator,
 
 **NON-NEGOTIABLE**: Every acceptance criterion MUST be verified in the browser. Do NOT verify by reading source code. Code review is not verification. An evaluation without browser screenshots is invalid.
 
-### Selector hygiene (read this BEFORE clicking anything)
+### Selector hygiene
 
-Playwright refs (`e123`) and positional selectors (`getByText('xxx').nth(N)`)
-go stale fast. If a panel opens, a row is added or removed, or any state
-change re-renders the page, every ref from a previous snapshot is suspect
-and `nth()` indices may have shifted by one.
-
-**Rules:**
-- Prefer `getByRole('button', { name: 'Stable Label' })` over `nth()` and
-  over numeric refs. Role + accessible name survives most re-renders.
-- Before clicking a numeric ref, confirm it's from the **most recent**
-  snapshot. If anything has happened since (a click, a navigation, a form
-  fill, a network response), take a fresh snapshot first.
-- Never use `nth(N)` for elements whose index depends on dynamic state
-  (e.g., "the 4th `:00` cell" — that 4 changes when slots get booked).
-  If the project's UI lacks stable test ids for such elements, write the
-  workaround you discovered to `pipeline/procedures.md` (see Step 2c).
+Playwright refs (`e123`) and `nth()` indices go stale the moment anything
+re-renders. Prefer `getByRole('button', { name: 'Stable Label' })`, and take a
+fresh snapshot before clicking a numeric ref if anything has happened since.
+Full rules — plus the `browser_evaluate` Promise hazard and how to batch
+computed-style probes into one call — are in
+`.claude/specsmith/references/browser-verification.md`.
 
 ### 2a — Verify each acceptance criterion
 
@@ -334,13 +333,9 @@ For **each** Given/When/Then criterion from `<spec-branch>/prd.md` for the stori
 2. **Snapshot** — `mcp__playwright__browser_snapshot` to get the accessibility tree and element structure
 3. **Interact** — Reproduce the "When" action using `mcp__playwright__browser_click`, `mcp__playwright__browser_type` / `mcp__playwright__browser_fill_form`, or `mcp__playwright__browser_press_key` for keyboard events (use `mcp__playwright__browser_evaluate` only when no dedicated tool fits).
 
-   **Never return an unresolved Promise from `browser_evaluate`.** Expressions
-   like `document.fonts.ready`, `new Promise(...)`, `fetch(...).then(...)`,
-   or anything that awaits a network/asset event can hang indefinitely if
-   the underlying event never fires (font 404, slow compile, idle network).
-   Return plain synchronous values only. For "is the page ready" checks,
-   use `document.readyState === 'complete'` or `mcp__playwright__browser_wait_for`
-   with a short timeout — not `document.fonts.ready`.
+   **Never return an unresolved Promise from `browser_evaluate`** — it can hang
+   indefinitely. Return plain synchronous values only; see
+   `.claude/specsmith/references/browser-verification.md` for the cases.
 4. **Snapshot again** — `mcp__playwright__browser_snapshot` to capture the result state
 5. **Assert** — Verify the "Then" expectation. Check `mcp__playwright__browser_console_messages` for JS errors and `mcp__playwright__browser_network_requests` for 4xx/5xx
 6. **Screenshot** — Required for:
@@ -459,44 +454,15 @@ If `designs/coverage.md` exists (written by the designing-interfaces agent), use
 - Split layout → implementation must match the split
 - Fundamentally different layout = **High severity, phase cannot pass**
 
-**Details — batch the computed-style probe into ONE `browser_evaluate` call — [Med] severity if wrong:**
+**Details — [Med] severity if wrong:**
 - Colours, typography, spacing, border radii, shadows
 - Interactive states (hover, focus, active)
 - Responsive behaviour
 
-Do NOT call `getComputedStyle(document.querySelector('<selector>'))` once per
-element per property — that is one model round-trip per probe, and a fidelity
-pass touching a dozen elements turns into dozens of sequential `browser_evaluate`
-calls (the dominant cost in long evaluation cycles is the number of round-trips,
-not the work each one does). Decide the full list of selectors and properties
-you care about FIRST — derive them from the failed pixel-diff `regions[]`, the
-`designs/coverage.md` component list, and the prototype HTML — then probe them
-all in a **single** `browser_evaluate` that returns one keyed object:
-
-```js
-() => {
-  // selector → properties of interest for this fidelity check
-  const probe = {
-    '.hero h1':   ['fontSize', 'lineHeight', 'fontWeight', 'color', 'marginBottom'],
-    'header nav': ['gap', 'paddingTop', 'paddingBottom', 'height'],
-    '.card':      ['padding', 'borderRadius', 'boxShadow', 'gap'],
-  };
-  const out = {};
-  for (const [sel, props] of Object.entries(probe)) {
-    const el = document.querySelector(sel);
-    if (!el) { out[sel] = null; continue; } // null = selector missed; fix the selector, don't re-probe blindly
-    const cs = getComputedStyle(el);
-    out[sel] = Object.fromEntries(props.map((p) => [p, cs[p]]));
-  }
-  return out;
-}
-```
-
-One call, one result table you compare against the prototype's values. Only
-issue a second `browser_evaluate` if the first surfaced a `null` (selector
-wrong) or revealed a new element you now need to inspect — never to fetch "the
-next property" of an element you already had in hand. Return plain synchronous
-values only (see the Promise caveat in 2a).
+Batch every computed-style probe into a SINGLE `browser_evaluate` returning one
+keyed object — one round-trip per element per property is the dominant cost in
+long evaluation cycles. Worked example in
+`.claude/specsmith/references/browser-verification.md`.
 
 After the comparison, stop the designs server with `pkill -f 'serve designs'` and remove `pipeline/designs-server-url`.
 
@@ -556,8 +522,15 @@ NOW you may read source code. Check for the current phase's stories:
 0. **Project conventions** — run as a sanity check on the developer's work:
 
    ```bash
-   node .claude/scripts/check-conventions.mjs
+   node .claude/scripts/run-gate.mjs conventions -- node .claude/scripts/check-conventions.mjs
    ```
+
+   Run every quality gate through `run-gate.mjs` (same wrapper the developer
+   uses). Never pipe a gate to `tail`/`grep` yourself — that discards the exit
+   code, which is how an entire audited run reported zero errors across 1,446
+   Bash calls. The wrapper preserves the exit code, bounds the printed output,
+   writes the full log to `pipeline/traces/last-<gate>.log`, and survives the
+   2-minute Bash timeout by running detached.
 
    This is the same script the developer was supposed to run as their first quality gate. If it reports violations, the developer either skipped it or bypassed with `SPECSMITH_CONVENTIONS=0`. Treat any violation here as automatic **[High]** severity in your feedback — these rules are machine-checked, no judgment calls. Cite the file, line, and rule name from the script output verbatim. If `.claude/conventions.json` doesn't exist, the script no-ops and you continue.
 

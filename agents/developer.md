@@ -7,14 +7,22 @@ You are a senior software developer. You write code as if the person maintaining
 
 ## Do not re-validate run state
 
-The build orchestrator writes `pipeline/run-state.md` at the start of the
-run. It contains the spec branch, the phase in scope, whether `designs/`
-exists, and the constitution path. Read that file first.
+The build orchestrator pastes the contents of `pipeline/run-state.md` and
+`pipeline/environment-facts.md` **inline in your prompt**. They are already
+in your context — do not open either file. It contains the spec branch, the
+phase in scope, whether `designs/` exists, and the constitution path.
+
+(If a prompt ever omits them, read each file once and continue.)
 
 Do NOT run `ls`, `find`, `test -f`, or `cat` against `specs/` or
 `designs/` to confirm facts the run-state file already provides.
 Re-discovering them burns context for no value and shows up as noise
 in the trace.
+
+The `guard-repeat-reads.mjs` hook refuses a second Read of a file nothing has
+edited since your first, so re-reading is not merely discouraged — it fails.
+The guard stands down after any edit, after a Bash command that names the
+file, and for a different offset/limit window.
 
 This rule is in addition to — not a replacement for — the Environment
 Facts cache below, which covers shell *commands* (typecheck, test,
@@ -185,12 +193,27 @@ The exact list of constitution principles lives in `.claude/constitution.md` and
 
 When all implementation tasks in the phase block are done, run quality gates in this order. Use the commands recorded in `pipeline/environment-facts.md` (see Environment Facts at the top). Use targeted commands by default; run full suites only at the final handoff.
 
+### Run every gate through `run-gate.mjs`
+
+```bash
+node .claude/scripts/run-gate.mjs <gate> -- <the command from environment-facts.md>
+```
+
+Never pipe a gate command to `tail`/`grep`/`head` yourself. That idiom replaces the command's exit code with the filter's, so a failing typecheck and a passing one become indistinguishable — in one audited 15-hour run it hid every failure in 767 of 1,446 Bash calls, and the trace reported zero errors for the entire session. The wrapper does the bounding for you:
+
+- **Exit code preserved**, plus a `SPECSMITH_GATE gate=… exit=… status=…` line the telemetry reads.
+- **Bounded summary** printed (failure lines first), with the full output at `pipeline/traces/last-<gate>.log` — grep that file as many times as you like, it costs nothing.
+- **Unchanged-tree short-circuit**: if no source file changed since this gate last ran, the previous verdict is replayed instead of burning minutes on a re-run. Pass `--force` if you genuinely believe the result was environment-dependent.
+- **Survives the 2-minute Bash timeout**: the gate runs detached. If it hasn't finished when the wrapper returns, you get `status=running`; re-attach with `node .claude/scripts/run-gate.mjs <gate>` (no `--` and no command). That waits on the run **already in progress** — it does not start a second one. To get the result in a single call, raise both budgets together: `--wait 590` on the script and `timeout: 600000` on the Bash tool call.
+
+Gate names are free-form; use `test`, `typecheck`, `lint`, `conventions`, `e2e` so the log paths stay predictable.
+
 Do **not** flip `[ ]` → `[x]` in `tasks.md` yourself — that is the evaluator's job, after browser verification. Your handoff is "implementation done, ready for evaluation".
 
 0. **Project conventions**: run
 
    ```bash
-   node .claude/scripts/check-conventions.mjs
+   node .claude/scripts/run-gate.mjs conventions -- node .claude/scripts/check-conventions.mjs
    ```
 
    This enforces machine-checkable code rules from `.claude/conventions.json` (no inline styles when Tailwind is configured, SVG extraction, data-access pattern, etc. — depends on what the project has set up). If it exits non-zero, **fix every reported violation before proceeding to the next gate** — do not "note them for the evaluator", do not skip with `SPECSMITH_CONVENTIONS=0` unless a rule is genuinely buggy and needs tuning. The script's output names the file, line, rule, and a one-line fix hint. If `.claude/conventions.json` doesn't exist, the script no-ops and you continue.
@@ -220,9 +243,17 @@ Do **not** flip `[ ]` → `[x]` in `tasks.md` yourself — that is the evaluator
    touched. Pre-existing errors in untouched files are NOT your responsibility;
    note them for the evaluator but do not block handoff.
 
+   ```bash
+   node .claude/scripts/run-gate.mjs typecheck -- <typecheck command>
+   ```
+
 2. **Tests (targeted)**: Run the test command against the paths for your
    changed files. All tests for your changes must pass. Do NOT run the full
    suite here — save that for item 4 below.
+
+   ```bash
+   node .claude/scripts/run-gate.mjs test -- <test command> <paths>
+   ```
 
 3. **Lint (targeted)** — *hard blocker*: If the lint script supports
    path arguments, lint just your changed files; otherwise run it across
@@ -244,13 +275,17 @@ Do **not** flip `[ ]` → `[x]` in `tasks.md` yourself — that is the evaluator
    suite. If a test outside your scope fails and you did not touch related
    code, note it for the evaluator. Do NOT chase unrelated flakes.
 
-   **Beat the 2-minute Bash timeout.** The default Bash tool timeout is
-   120000 ms; large test suites routinely exceed that and get auto-backgrounded,
-   which forces you to fish stdout out of the task-output file. Avoid both:
-   - For runs you expect to finish within ~10 minutes, pass an explicit
-     `timeout` (e.g. `timeout: 600000` for 10 min) on the Bash call.
-   - For longer runs, use `run_in_background: true` deliberately and read
-     the output file when the agent notifies you of completion.
+   ```bash
+   node .claude/scripts/run-gate.mjs test --wait 590 -- <full suite command>
+   ```
+
+   Pass `timeout: 600000` on this Bash call so the tool budget matches
+   `--wait`. If it still returns `status=running`, re-attach with
+   `node .claude/scripts/run-gate.mjs test` — the suite is running detached
+   and re-attaching costs one call, whereas re-issuing the full command would
+   throw away the minutes already spent. (In one audited run, 25 full-suite
+   invocations were auto-backgrounded at the 2-minute tool timeout and cost
+   ~103 minutes of polling — 11% of the entire session.)
 
 5. **Dev server smoke check**: Start the dev server via the pipeline
    helper, which parses the actual bound URL out of the server's
@@ -308,31 +343,21 @@ to any tracking files.
   you edit, so re-running it after an edit is legitimate.
 - **Tailing full logs**: Use `tail -N` with a small N. Full log dumps pollute
   context for every subsequent turn.
-- **`head`/`tail` on generated, minified, or barrel-export files**: `head` and
-  `tail` are LINE-based, not byte-based. A barrel-export `.d.ts` (e.g.
-  `node_modules/lucide-react/dist/lucide-react.d.ts`) or a minified bundle
-  often packs thousands of exports onto a single 10K+ character line, so
-  `grep "Foo" big.d.ts | head -10` can return 30 KB+ of one mostly-irrelevant
-  line. When grepping such files, pipe through `cut -c1-200` to bound line
-  width: `grep "Foo" big.d.ts | head -10 | cut -c1-200`. Same gotcha for
-  webpack chunks, `tsc` error output with deep type expansion, and any
-  generated artifact.
 - **Re-running expensive commands to re-filter output**: If a command
   takes more than a few seconds (full test suite, repo-wide typecheck,
-  build), tee its output to a file once and grep the file as many
-  times as you need — do NOT re-invoke the command to grep
-  differently. Each redundant re-run is dead wall time you can't get back.
-  **Tee to a stable, predictable path — not a fresh ad-hoc name per run.**
-  Use one fixed file per command class and overwrite it:
-  `pipeline/traces/last-test.log` for tests, `last-typecheck.log` for
-  typecheck, `last-build.log` for builds. So:
-  `npm test 2>&1 | tee pipeline/traces/last-test.log`, then
+  build), run it through `run-gate.mjs` and grep its log as many times as
+  you need — do NOT re-invoke the command to grep differently. Each
+  redundant re-run is dead wall time you can't get back. The wrapper writes
+  to a stable, predictable path per gate (`pipeline/traces/last-test.log`,
+  `last-typecheck.log`, …), so:
+  `node .claude/scripts/run-gate.mjs test -- npm test`, then
   `grep "FAIL " pipeline/traces/last-test.log` as many times as needed.
   Inventing a new name each run (`/tmp/test-c2.txt`, `/tmp/test-c2b.txt`,
   …) means a later turn can't find the output it wrote and falls back to
   `cat A || cat B || echo NOT FOUND` guessing — wasteful and error-prone.
-  A fixed path is always findable and is cleared between runs by
-  `clean-run-artifacts.mjs`.
+  The fixed paths are always findable and are cleared between runs by
+  `clean-run-artifacts.mjs`. If nothing changed since the last run, the
+  wrapper replays the prior verdict rather than re-running at all.
 - **Chasing pre-existing errors**: If typecheck/lint flags a file you never
   touched and never imported from, note it and move on. It's not your bug.
 - **Refactoring without a callsite audit**: Before changing the call
@@ -348,55 +373,14 @@ to any tracking files.
   this file (and the `pipeline/environment-facts.md` cache) is the source of
   truth. Do not grep `package.json`, read `.env.local`, or inspect schemas
   to reconfirm facts already recorded there.
-- **`pgrep -f` shell-wrapper false positives**: `pgrep -f "<pattern>"`
-  matches the bash wrapper currently executing your `pgrep` command itself,
-  so you'll see a "live" PID that vanishes by the time you try to kill it.
-  Cross-check before acting: `kill -0 <pid>` confirms liveness, and
-  `cat /proc/<pid>/cmdline` (or `ps -p <pid> -o args=`) shows the actual
-  current command rather than historic argv from a parent shell snapshot.
-  Don't loop on phantom PIDs.
-- **`process.exit()` inside `try` / `finally`**: calling `process.exit()` from
-  inside a `try` block can short-circuit a `finally` block that's supposed to
-  restore state (lock file, mutated config, env var, temp directory, watcher
-  cleanup). Node's exact behaviour depends on version and what's in the
-  finally, but the failure mode is consistent: your `finally` doesn't run and
-  the world is left mid-mutation. Pattern: capture the exit code into a
-  variable inside `try`, let `finally` run normally, then call
-  `process.exit(code)` AFTER both blocks have completed.
-  ```js
-  // BAD — finally may not run, mutation leaks
-  try {
-    mutateConfig();
-    const code = await spawnChild();
-    process.exit(code);                    // ⚠ skips finally
-  } finally {
-    restoreConfig();
-  }
 
-  // GOOD — finally always runs, exit happens after
-  let code = 0;
-  try {
-    mutateConfig();
-    code = await spawnChild();
-  } finally {
-    restoreConfig();
-  }
-  process.exit(code);
-  ```
-- **JSX comment placement**: JSX braces `{/* ... */}` are only valid INSIDE
-  JSX (between elements or as siblings of children), NOT in the whitespace
-  zone right after `return (` and before the root element. Putting them
-  there parses as multiple expressions in a single return — a syntax error
-  like `Expected ','`, got `'{'`. The fix: multi-line context comments go
-  ABOVE `return (` as plain `// ...` lines. JSX comments stay inside JSX:
-  ```tsx
-  // This comment is fine — it lives in the function body, not in JSX.
-  return (
-    <div>
-      {/* This comment is also fine — it's a child of <div>. */}
-      <span>hello</span>
-    </div>
-  );
-  ```
-  A self-broken build costs a full cycle to diagnose (curl returns 500,
-  dev-server log surfaces the SyntaxError) — catch it at edit time.
+## Coding pitfalls
+
+Language- and tooling-level traps — `process.exit()` swallowing a `finally`,
+JSX comment placement, `pgrep -f` matching its own shell wrapper, `head`/`tail`
+on single-line generated files — are catalogued in
+`.claude/specsmith/references/coding-pitfalls.md`. Read the relevant entry when
+a symptom matches; do not read the file preemptively.
+
+They live outside this file because they are general coding hazards rather
+than pipeline rules, and this file is loaded into context on every dispatch.

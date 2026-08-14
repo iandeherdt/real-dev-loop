@@ -3,7 +3,7 @@
 // Spawns the hook with synthetic PreToolUse payloads and asserts exit codes.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -241,6 +241,76 @@ function runEdit(cwd, filePath) {
   };
   const r = spawnSync('node', [HOOK], { input: JSON.stringify(payload), encoding: 'utf8' });
   assert(r.status === 0, 'noops on Read tool');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Self-managing dispatch lock ──
+// The orchestrator used to `printf` the sentinel before every Agent call and
+// `rm -f` it after: 40 Bash calls of ceremony in one audited run, and a lock
+// it could forget to open. The guard now opens it on dispatch; trace-hook.mjs
+// closes it on SubagentStop.
+
+function runAgent(cwd, subagentType = 'developing-features') {
+  return spawnSync('node', [HOOK], {
+    input: JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Agent',
+      tool_input: { subagent_type: subagentType, prompt: 'do the thing' },
+      cwd,
+    }),
+    encoding: 'utf8',
+  });
+}
+
+// ── Case: an Agent dispatch opens the lock and is itself allowed ──
+{
+  const cwd = makeCwd();
+  const lock = join(cwd, 'pipeline', 'dispatch-active.txt');
+  assert(!existsSync(lock), 'no dispatch lock before the Agent call');
+
+  const r = runAgent(cwd);
+  assert(r.status === 0, 'the Agent dispatch itself is never blocked');
+  assert(existsSync(lock), 'the guard opens the dispatch lock on an Agent call');
+  assert(
+    /developing-features/.test(readFileSync(lock, 'utf8')),
+    'the lock records which subagent type was dispatched'
+  );
+
+  // …and the dispatched subagent may now do its job.
+  assert(runBash(cwd, 'npm run dev').status === 0, 'a subagent may start the dev server once dispatched');
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case: trace-hook closes the lock on SubagentStop, re-arming the guard ──
+{
+  const TRACE_HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'trace-hook.mjs');
+  const cwd = makeCwd();
+  mkdirSync(join(cwd, 'pipeline', 'traces'), { recursive: true });
+  const lock = join(cwd, 'pipeline', 'dispatch-active.txt');
+
+  runAgent(cwd);
+  assert(existsSync(lock), 'lock open while the subagent runs');
+
+  spawnSync('node', [TRACE_HOOK], {
+    input: JSON.stringify({ hook_event_name: 'SubagentStop', session_id: 'abcd1234', cwd }),
+    encoding: 'utf8',
+  });
+  assert(!existsSync(lock), 'trace-hook removes the lock on SubagentStop');
+  assert(
+    runBash(cwd, 'npm run dev').status === 2,
+    'the orchestrator is bound by the guard again after the subagent returns'
+  );
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// ── Case: outside a /build run, an Agent call opens no lock ──
+{
+  const cwd = makeCwd({ buildRun: false });
+  runAgent(cwd);
+  assert(
+    !existsSync(join(cwd, 'pipeline', 'dispatch-active.txt')),
+    'no lock is created outside an active /build run'
+  );
   rmSync(cwd, { recursive: true, force: true });
 }
 
