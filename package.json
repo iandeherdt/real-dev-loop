@@ -1,6 +1,6 @@
 {
   "name": "specsmith",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "description": "Claude Code skills, agents, and scripts that drive an end-to-end development workflow: grill the idea, write a PRD, plan it, decompose into tasks, then design + build with Playwright-MCP-driven evaluation.",
   "bin": {
     "specsmith": "bin/cli.mjs"

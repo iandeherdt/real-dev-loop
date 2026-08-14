@@ -73,6 +73,26 @@ rebuild trustworthy instead of hopeful.
 <!-- One per new SC-###. Drop this sub-section if the amendment added none. -->
 
 - [ ] Cover SC-### with <assertion / Playwright check>
+
+### Full verification
+
+<!--
+ALWAYS re-emit this block, every amendment, unchanged. Copy the gates from the
+spec's own `## Phase N: Full verification` phase so the commands match what
+the project actually uses.
+
+These assert a property of the ENTIRE codebase at one moment, and your
+amendment ends that moment: the suite that passed earlier did not include this
+fix, and the build that succeeded did not compile it. Re-emitting here rather
+than un-ticking the original phase is also what keeps the ordering right —
+/build walks phases in ascending order, so un-ticking an earlier phase would
+run the gates BEFORE the fix and pass on stale code.
+-->
+
+- [ ] Full test suite passes — `node .claude/scripts/run-gate.mjs test --wait 590 -- <full suite command>`
+- [ ] Production build succeeds — `node .claude/scripts/run-gate.mjs build --wait 590 -- <build command>`
+- [ ] Typecheck clean across the whole repo — `node .claude/scripts/run-gate.mjs typecheck -- <typecheck command>`
+- [ ] Lint clean across the whole repo, zero warnings — `node .claude/scripts/run-gate.mjs lint -- <lint command>`
 ```
 
 <!--

@@ -102,19 +102,39 @@ Append **one new phase** at the end, numbered with the next free number from Ste
 
 The heading must be exactly `## Phase N: Amendment M — <short title>` — the `## Phase N:` prefix is what `/build` and `phase-block.mjs` match on. `###` sub-headings inside the phase are safe; another `##` heading would end the block early.
 
-Use the structure in `templates/amendment.md`. The phase has three parts:
+Use the structure in `templates/amendment.md`. The phase has four parts:
 
 1. **Fixes** — one task per item, verb-led, each with a sibling check task, exactly as `/tasks` writes them. Cite the identifier the task serves: `(FR-029)` or `(fixes FR-014)`.
-2. **Regression checks** — the part that makes a rebuild trustworthy. For every previously-passing behaviour this amendment could plausibly break, add a `- [ ] Verify …` task naming the `FR-###` and the route or module. Derive them from the files the fix touches: anything else that reads the same module, renders the same route, or asserts the same requirement.
+2. **Regression checks** — for every previously-passing behaviour this amendment could plausibly break, add a `- [ ] Verify …` task naming the `FR-###` and the route or module. Derive them from the files the fix touches: anything else that reads the same module, renders the same route, or asserts the same requirement.
 3. **Coverage check** — one `- [ ] Verify …` per new `SC-###`, matching `/tasks`' coverage discipline.
+4. **Full verification** — re-emit the whole-system gate block verbatim, so the run ends by checking the entire thing, not just the amendment.
+
+### Re-emit the full verification block — always
+
+Copy the gates from the spec's existing `## Phase N: Full verification` phase into the end of your new amendment phase (the block is in `templates/amendment.md` if the spec predates it):
+
+- full test suite
+- production build
+- repo-wide typecheck
+- repo-wide lint
+
+This is not optional and it is not duplication to be tidied away. Those gates assert a property of the **entire codebase at one moment**. The moment your amendment lands, the earlier tick is describing a codebase that no longer exists — the suite that passed did not include your fix, and the build that succeeded did not compile it.
+
+Re-emitting them here rather than un-ticking the original phase is what keeps the ordering right. `/build` walks phases in ascending order, so un-ticking Phase 7 while the amendment sits in Phase 8 would run the full verification **before** the fix and pass on stale code. The gates have to be the last thing in the last phase, which means they belong inside the amendment phase.
+
+They are also cheap to repeat compared to everything else here: each is one `run-gate.mjs` call, and the wrapper replays a cached verdict when nothing has changed since it last ran.
 
 Keep the phase to a size a single developer dispatch can hold. If it exceeds ~8 unchecked tasks, `/build` will slice it automatically (`$SLICE_THRESHOLD`), which is fine — but if it exceeds ~15, split it into two amendment phases along a natural boundary instead.
 
 ### Re-opening a completed task
 
-Default: **do not**. Add a regression check in the new phase instead. A ticked task is the record that an evaluator verified that behaviour in a browser; clearing it destroys that record and tells you nothing new.
+Two kinds of ticked task, two different answers. The distinction is what the tick *means*.
 
-Un-check an existing `- [x]` only when the amendment makes the original task's *definition of done* wrong — the task as written would now be verified differently. In that case:
+**Whole-system gates** — the full suite, the production build, repo-wide typecheck and lint. A tick here means "the entire codebase was in this state at one moment". Your amendment ends that moment, so the tick is stale by construction. These get re-verified on every amendment — handled by re-emitting the Full verification block at the end of the new phase, per the section above. Do not un-tick the original phase; that runs them too early.
+
+**Feature-behaviour tasks** — "Verify the unlink control removes the credit". A tick here means an evaluator drove a browser and watched it work. That remains true regardless of what you add later. Default: **do not un-tick**. Add a regression check in the new phase instead, which re-verifies the behaviour *after* the fix lands and leaves the original record intact.
+
+Un-check a feature-behaviour `- [x]` only when the amendment makes the original task's *definition of done* wrong — the task as written would now be verified differently. In that case:
 
 - Flip `[x]` → `[ ]` and amend the task text to the new definition in the same edit.
 - Append ` (re-opened by Amendment M — <one-line reason>)` so the history survives.

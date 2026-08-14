@@ -193,6 +193,23 @@ specsmith closes this loop in three places:
 
 Together these turn "the designer added something the plan didn't list" from a silent miss into either a merged task (best case) or a phase-blocking [High] (worst case).
 
+### Every spec ends with whole-system gates (v0.29.0+)
+
+`/tasks` emits a final `Full verification` phase on every spec, always last and never dropped:
+
+```markdown
+## Phase 7: Full verification
+
+- [ ] Full test suite passes — `run-gate.mjs test --wait 590 -- <full suite command>`
+- [ ] Production build succeeds — `run-gate.mjs build --wait 590 -- <build command>`
+- [ ] Typecheck clean across the whole repo
+- [ ] Lint clean across the whole repo, zero warnings
+```
+
+Every other phase verifies a slice; this one verifies the whole thing once all the slices are in. The production build gate matters most — before v0.29.0 **nothing in the loop ever ran a production build**, so a feature could pass every phase, every browser check, and every pixel diff, and still fail `npm run build`.
+
+`/extend-spec` re-emits this block at the end of every amendment phase, and `/build` keeps it in the last slice when a phase is large enough to be split. See [Extending a spec after the build](#extending-a-spec-after-the-build) for why they are re-emitted rather than un-ticked.
+
 ### Phase-to-phase signal
 
 Three rules in the evaluator make sure issues don't quietly carry forward across cycles:
@@ -415,20 +432,27 @@ Claude: Runs spec-status.mjs — reports next free identifiers (FR-029, SC-012),
 
         Amends prd.md (FR-029 appended, Amendments entry recording all three),
         updates data-model.md (PaymentCredit gains refundedAt),
-        appends "## Phase 7: Amendment 1 — refund handling" to tasks.md with
-        fix tasks, sibling checks, and regression checks for the FRs the change
-        could break.
+        appends "## Phase 8: Amendment 1 — refund handling" to tasks.md with
+        fix tasks, sibling checks, regression checks for the FRs the change
+        could break, and a re-emitted Full verification block (suite, build,
+        typecheck, lint) so the run ends by checking the whole thing.
 
 You: /build
 
-Claude: Skips phases 1-6 (all ticked), starts at Phase 7.
+Claude: Skips phases 1-7 (all ticked), starts at Phase 8.
 ```
 
 Three things it will not do:
 
 - **Implement anything.** It writes documents; `/build` does the work. Routing the fix back through the loop is the whole point.
 - **Renumber an identifier.** `FR-###`/`NFR-###`/`SC-###`/`OQ-###` are append-only. `scripts/spec-status.mjs` reports the next free number for each prefix, because a collision silently repoints every task, feedback file, and carryover that cited the original.
-- **Un-tick a completed task**, except when the amendment makes that task's definition of done wrong. A ticked task is the record that an evaluator verified that behaviour in a real browser — regression coverage belongs in the new phase, not in erased history. (And `/build` re-dispatches a phase when it has *any* unchecked task, so un-ticking one task in Phase 1 re-runs Phase 1's entire cycle.)
+- **Un-tick a completed feature task**, except when the amendment makes that task's definition of done wrong. A ticked feature task is the record that an evaluator verified that behaviour in a real browser — regression coverage belongs in the new phase, not in erased history. (And `/build` re-dispatches a phase when it has *any* unchecked task, so un-ticking one task in Phase 1 re-runs Phase 1's entire cycle.)
+
+Whole-system gates are the deliberate exception, and they are re-verified on **every** amendment. `/tasks` ends every spec with a `Full verification` phase — full test suite, production build, repo-wide typecheck, repo-wide lint — and `/extend-spec` re-emits that block at the end of each amendment phase.
+
+The distinction is what a tick means. A feature task's tick says "an evaluator watched this work in a browser", which stays true no matter what you add later. A gate's tick says "the entire codebase was in this state at one moment" — and your amendment ends that moment, because the suite that passed did not include your fix and the build that succeeded did not compile it.
+
+They are re-emitted rather than un-ticked because `/build` walks phases in ascending order: un-ticking the earlier `Full verification` phase while the amendment sits in a later one would run the gates *before* the fix and pass on stale code. The gates have to be the last thing in the last phase. They are also cheap to repeat — one `run-gate.mjs` call each, and the wrapper replays a cached verdict when nothing has changed.
 
 It will also tell you when **not** to extend: if the request would need its own PRD to make sense, it says so and stops, so a spec doesn't quietly grow to cover three features.
 

@@ -51,6 +51,12 @@ Discover the following as you go and append each to
     form ONCE (read `package.json`'s `test:e2e` script / `playwright.config.ts`
     a single time) and record it — do not rediscover the invocation per run.
 - Lint command (verify the script exists in package.json once per session).
+- Production build command (e.g. `npm run build`), if the project has one.
+  The Full verification phase runs it as a gate — it is the only place in the
+  loop that proves the app actually compiles for production, so a project with
+  a build script must have this recorded. Note if the project genuinely has
+  none (a library with no build step) so the gate can be dropped rather than
+  silently skipped.
 - Dev server command (commonly `npm run dev`). The evaluator drives the
   app through Playwright MCP pointed at a normal localhost URL, so you do
   not need to reserve a port against it.

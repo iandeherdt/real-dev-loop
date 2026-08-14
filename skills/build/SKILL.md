@@ -113,7 +113,7 @@ If `UNCHECKED > $SLICE_THRESHOLD` (default `8`), do NOT dispatch the whole phase
 
 Instead, split the phase block into sequential developer dispatches:
 
-1. **Group tasks into natural sub-sections** of ~4–6 unchecked tasks each. Prefer boundaries that match the work — all migrations together, all new repository files together, all schema work together, all route handlers together. Don't split a task and its sibling check across slices.
+1. **Group tasks into natural sub-sections** of ~4–6 unchecked tasks each. Prefer boundaries that match the work — all migrations together, all new repository files together, all schema work together, all route handlers together. Don't split a task and its sibling check across slices. If the phase has a `### Full verification` sub-section (whole-system gates: full suite, production build, repo-wide typecheck and lint), those tasks go in the **last** slice, never an earlier one — they assert a property of the finished state, so running them before the remaining slices land would verify code that is still half-written.
 2. **Dispatch each slice as its own `developing-features` Agent call**, in order. Each call gets fresh context, so slice B's developer won't have slice A's working memory — that's fine, they'll see slice A's edits in `git diff HEAD` and on disk.
 3. **Wait for each slice to return** before dispatching the next. The Agent tool blocks until the subagent finishes, so serial dispatch is automatic — don't try to parallelise slices, they share files.
 4. **Pass the slice as the phase block** in the developer prompt, with a header line naming it (e.g. `### Slice A of 3: migrations`) so the developer knows it's a subset and won't panic about the missing tasks.

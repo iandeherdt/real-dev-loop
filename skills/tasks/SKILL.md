@@ -63,8 +63,13 @@ Default phases — use these unless the plan obviously calls for something diffe
 4. **UI** — components, pages, styling
 5. **Integration** — workers, external providers, jobs, webhooks
 6. **Hardening** — error paths, observability, performance, accessibility, i18n
+7. **Full verification** — whole-system gates: full test suite, production build, repo-wide typecheck, repo-wide lint
 
 Drop phases that do not apply. Add a phase only when a self-contained area of the plan does not fit any of the above.
+
+**Phase 7 is the exception: always emit it, always last.** Every other phase verifies a slice of the work; this one verifies the whole thing once all the slices are in. Without it a feature can pass every phase and still fail `npm run build`, because nothing else in the loop ever runs a production build.
+
+Its tasks are different in kind from the rest, which is why they live in their own phase rather than being sprinkled through Hardening. A feature task records a behaviour the evaluator confirmed in a browser, and stays `[x]` forever. A gate in Phase 7 asserts a property of the entire codebase at one moment, so it goes stale the instant anything changes — `/extend-spec` re-emits the whole block at the end of every amendment phase rather than trusting the earlier tick.
 
 ## Task rules
 
@@ -97,6 +102,7 @@ Cross-check before finalizing:
 - Every file in `plan.md`'s "Files to touch" table maps to at least one task. Orphan files = missing tasks.
 - Every entity in `data-model.md` maps to at least one Persistence-phase task.
 - Every `SC-###` in `prd.md` maps to at least one Hardening-phase verification task.
+- The final Full verification phase exists and is the highest-numbered phase in the file.
 - Every "Pass with waiver" row in the constitution table maps to a Hardening-phase task that documents or mitigates the waiver.
 
 ## After writing
