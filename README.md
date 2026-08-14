@@ -7,15 +7,27 @@ You install it once into a project; from then on, building a feature is a sequen
 ## The pipeline
 
 ```
-       /grill-me                  /write-prd                /plan                   /grill-plan                /tasks                  /design                /build
-   (interrogate idea)        (synthesise PRD,        (Technical Context,        (pressure-test the         (decompose into          (HTML/CSS              (developer ↔
-                              create branch +          Constitution Check,        plan: rows, files,         phased markdown          prototypes via         evaluator loop;
-                              numbered folder)         Project Structure,         hidden complexity,         checkbox tasks)          designer ↔             evaluator
-                                                       Files-to-touch)            failure modes)                                      design-critique)       checks tasks off)
-                                                       + data-model.md
+  /grill-me ─→ /write-prd ─→ /plan ─→ /grill-plan ─→ /tasks ─→ /design ─→ /build
+      │            │           │           │            │          │         │
+ interrogate   synthesise   Technical  pressure-test  phased    HTML/CSS  developer ↔
+  the idea      the PRD,     Context,   the plan:    checkbox  prototypes  evaluator
+               new branch  Constitution  rows,        tasks    via designer   loop;
+               + numbered     Check,     files,                ↔ critique  evaluator
+                 folder      Structure,  hidden                            ticks tasks
+                            Files-to-    complexity,                           off
+                              touch,     failure
+                            data-model    modes
+                                                                               │
+   ┌───────────────────────────────────────────────────────────────────────────┘
+   │  a bug, a missed edge case, a deferred carryover, a "can it also…"
+   ▼
+/extend-spec ─→ amends prd.md (+ plan.md / data-model.md when structural)
+                appends a new phase to tasks.md ─────────────→ /build again
 ```
 
-Five planning skills produce inspectable artifacts. Two execution skills (`/build`, `/design`) hand work to subagents and iterate until verification passes.
+Six skills shape the spec — the artifacts you read, edit, and review. Two execution skills (`/build`, `/design`) hand the work to subagents and iterate until verification passes.
+
+**The pipeline is a loop, not a line.** `/build` stops when every task is ticked — and then you use the feature and find something. `/extend-spec` folds that finding back into the spec and appends a new phase of tasks, so `/build` finishes it through the same developer → evaluator loop that verified everything else, instead of it becoming an ad-hoc fix that leaves the spec describing a system that no longer exists. See [Extending a spec after the build](#extending-a-spec-after-the-build).
 
 The artifacts for each feature live at `specs/NNN-<feature-slug>/` in the host project — first-class team documentation, not AI scratch.
 
@@ -37,13 +49,14 @@ This:
 
 1. Copies skills into `.claude/skills/` (one per skill, with bundled `templates/`)
 2. Copies subagent definitions into `.claude/agents/`
-3. Copies trace and helper scripts into `.claude/scripts/`
-4. Drops a starter `.claude/constitution.md` and `specs/glossary.md` (each skipped if you already have one)
-5. Merges baseline `.claude/settings.json` (permissions, additional directories, trace hooks) and `.claude/launch.json` (debug configurations) — your existing entries are preserved
-6. Appends a "Real Dev Loop" section to your `CLAUDE.md` (created if missing)
-7. Runs `claude mcp add --scope project playwright -- npx @playwright/mcp@latest --isolated` so the evaluator and design-critique agents can drive a real browser
-8. Creates `pipeline/feedback/` and `pipeline/traces/` (runtime scratch space) and seeds `pipeline/procedures.md` with a starter overlay-handling procedure
-9. Writes a checksummed manifest to `.claude/specsmith/manifest.json` so subsequent `update` runs know which files have been edited locally
+3. Copies trace, guard, and helper scripts into `.claude/scripts/`
+4. Copies reference docs into `.claude/specsmith/references/` (progressive-disclosure companions the agent files link to, kept out of `.claude/agents/` so they aren't loaded as subagent definitions)
+5. Drops a starter `.claude/constitution.md` and `specs/glossary.md` (each skipped if you already have one)
+6. Merges baseline `.claude/settings.json` (permissions, additional directories, trace hooks) and `.claude/launch.json` (debug configurations) — your existing entries are preserved
+7. Appends a "Real Dev Loop" section to your `CLAUDE.md` (created if missing)
+8. Runs `claude mcp add --scope project playwright -- npx @playwright/mcp@latest --isolated` so the evaluator and design-critique agents can drive a real browser
+9. Creates `pipeline/feedback/` and `pipeline/traces/` (runtime scratch space) and seeds `pipeline/procedures.md` with a starter overlay-handling procedure
+10. Writes a checksummed manifest to `.claude/specsmith/manifest.json` so subsequent `update` runs know which files have been edited locally
 
 Useful flags:
 
@@ -55,6 +68,18 @@ Useful flags:
 > **Heads up:** `init` adds `Bash(*)` to your `.claude/settings.json` allowlist (alongside `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Agent`, and `mcp__playwright__*`) so the build and design loops aren't interrupted by per-command prompts during dev-server start/stop, `pkill`, `sed`/`awk` runs, test commands, migrations, etc. If your project requires tighter permissions, hand-edit `.claude/settings.json` after install — replace `Bash(*)` with specific patterns like `Bash(npm run *)`, `Bash(npx playwright *)`, `Bash(node .claude/scripts/*)` and so on. The trade-off is you'll start seeing prompts mid-loop when something the agents need wasn't allowlisted.
 >
 > Existing entries in `settings.json` are preserved — `init` only *adds* missing entries, it never removes yours.
+
+## How the loop keeps itself honest
+
+Everything below is one idea applied in different places: **an agent's claim that something works is not evidence that it works, and a rule written in prose is not a rule.**
+
+Each mechanism here replaced a paragraph in an agent file that agents demonstrably ignored. They fall into three groups:
+
+- **Gates the work must pass** — conventions, quality gates, structural and visual diffs. These decide whether a phase is done, instead of the implementer deciding.
+- **Guards that refuse a known-bad move** mid-run — repeat commands, repeat reads, blind editing, out-of-scope edits, an orchestrator doing its subagents' work.
+- **Signals that survive between cycles** — carryovers, FR-level hard fails, escalation of stale `[Med]`s, and a trace you can audit afterwards.
+
+You can skip this section on a first read; the pipeline works without knowing any of it. Come back when you want to know why a run refused to do something.
 
 ### Per-project conventions (machine-checked)
 
@@ -197,12 +222,14 @@ The wrapper fixes four things at once:
 
 ### Runtime guard against agent flailing
 
-`init` installs `scripts/guard-repeat-commands.mjs` as a `PreToolUse` hook on every `Bash` call. It refuses two patterns mid-run rather than logging them after the fact (real /build traces showed agents falling into both, ignoring prose anti-patterns):
+`init` installs four `PreToolUse` guards that refuse a bad pattern mid-run rather than logging it after the fact. Every one of them started as prose in an agent file that agents then ignored — the governing rule in this repo is that a documented anti-pattern ships with a mechanism, or it is a comment rather than a control.
+
+The first two live in `scripts/guard-repeat-commands.mjs`, on every `Bash` call:
 
 1. **Re-running an expensive command to re-filter output.** If `npm run test/lint/typecheck/build`, `playwright test`, `prisma migrate`, `tsc`, `jest`, `vitest`, `next lint/build`, `eslint`, the design-diff scripts (`pixel-diff.mjs` / `dom-diff.mjs` and their `run-*` wrappers), `cargo`, `go test`, `mvn`, or `gradle` already ran in this session and no `Edit` or `Write` tool call happened since, the second invocation is denied with a message pointing to `tee /tmp/last-out.txt` once, then grep the file. The "base" command is matched after stripping trailing `| grep/tail/head/awk/sed/wc/jq/...` pipes **and stream redirections** (`2>&1`, `> out.txt`), so re-running with a different filter or redirect still counts as a repeat. Since v0.27.0 it also **normalises the invocation form**: `npx vitest run x`, `node ./node_modules/vitest/dist/cli.js run x`, and `./node_modules/.bin/vitest run x` all collapse to one base, so switching styles no longer resets the guard. (That mattered — a regex bug meant `npx tsc --noEmit` and the `dist/cli.js` vitest form, 171 calls between them in one audited run, were never matched at all: alternatives written as `tsc(\s|$)` inside a group closed by a trailing `\b` can never match when the tool is followed by a flag.) The cheap `show-pixel-diff.mjs` / `show-dom-diff.mjs` readers are explicitly exempt — they read the already-written JSON, so repeating them is free and is exactly what you should do instead of re-running the diff. (Added after an audit trace showed a full-app pixel-diff run twice back-to-back, 0 edits between, ~130s wasted, only to re-grep its own output — the diff scripts weren't in the expensive list.)
 2. **State-wipe loops.** Three or more `rm -rf` of the same path (matching `pglite`, `.next`, `node_modules`, `data/`) within 30 minutes is denied. If the same failure persists after wiping, the bug isn't stale state.
 
-Two sibling guards were added in v0.27.0 after a 15-hour `/build` trace was audited (5,324 events, 2,600+ tool calls):
+Two more were added in v0.27.0 after a 15-hour `/build` trace was audited (5,324 events, 2,600+ tool calls):
 
 3. **Re-reading a file already in context** (`scripts/guard-repeat-reads.mjs`, `PreToolUse` on `Read`). 318 of 514 Reads in that run — 62% — re-read a file nothing had touched since. The worst offenders were specsmith's own caches: `pipeline/run-state.md` read 24× and `pipeline/environment-facts.md` 29×, despite three separate files instructing agents to read them once (the `/build` skill even cited a prior run's 10× as the cautionary tale, and it got worse). The guard stands down whenever the content could have changed: after any edit to the file, after any Bash command naming it, for a different `offset`/`limit` window, and — critically — across subagent boundaries, since a subagent's context starts empty.
 4. **Blind editing** (`scripts/guard-edit-cadence.mjs`, `PreToolUse` on the edit tools). Six consecutive edits to one file with no test, typecheck, lint, read-back, or browser check in between is refused. That run had 10 such stretches totalling 48 edits, worst case 8 in a row; `Edit` results were also its single largest context cost at 6.5 MB, more than `Read` (5.3 MB) and more than all Bash output combined (2.6 MB). Any verification resets the counter, as does moving to a different file.
@@ -364,6 +391,51 @@ Claude: For each phase with unchecked tasks:
         Stops when every task in tasks.md is [x].
 ```
 
+## Extending a spec after the build
+
+`/build` stops when every task is ticked. Then you use the feature and find a bug, or the evaluator's last cycle deferred a carryover, or someone asks for one more thing.
+
+Fixing that by hand is the moment the spec starts lying: the PRD describes a system that no longer matches the code, and the fix itself never passes through the developer → evaluator loop that verified everything else.
+
+`/extend-spec` puts it back on the rails.
+
+```
+You: /extend-spec
+     The surplus badge shows a negative amount when someone overpays,
+     and we never specified what happens on a refund.
+
+Claude: Runs spec-status.mjs — reports next free identifiers (FR-029, SC-012),
+        next free phase number (7), the phase-4 carryover the evaluator deferred,
+        and a BLOCKED verdict still sitting in build-log.md.
+
+        Classifies each item:
+          - negative surplus badge  → Defect against FR-014 (no new requirement)
+          - refund behaviour        → Gap, becomes FR-029
+          - deferred carryover      → Deferred, folded in
+
+        Amends prd.md (FR-029 appended, Amendments entry recording all three),
+        updates data-model.md (PaymentCredit gains refundedAt),
+        appends "## Phase 7: Amendment 1 — refund handling" to tasks.md with
+        fix tasks, sibling checks, and regression checks for the FRs the change
+        could break.
+
+You: /build
+
+Claude: Skips phases 1-6 (all ticked), starts at Phase 7.
+```
+
+Three things it will not do:
+
+- **Implement anything.** It writes documents; `/build` does the work. Routing the fix back through the loop is the whole point.
+- **Renumber an identifier.** `FR-###`/`NFR-###`/`SC-###`/`OQ-###` are append-only. `scripts/spec-status.mjs` reports the next free number for each prefix, because a collision silently repoints every task, feedback file, and carryover that cited the original.
+- **Un-tick a completed task**, except when the amendment makes that task's definition of done wrong. A ticked task is the record that an evaluator verified that behaviour in a real browser — regression coverage belongs in the new phase, not in erased history. (And `/build` re-dispatches a phase when it has *any* unchecked task, so un-ticking one task in Phase 1 re-runs Phase 1's entire cycle.)
+
+It will also tell you when **not** to extend: if the request would need its own PRD to make sense, it says so and stops, so a spec doesn't quietly grow to cover three features.
+
+Run it **before** the next `/build`. `clean-run-artifacts.mjs` wipes `pipeline/feedback/` at the start of every run, so rebuilding first destroys the evaluator's record of what it deferred.
+
+You can also run `node .claude/scripts/spec-status.mjs` on its own at any time — it is read-only, and it is the fastest way to see what a spec still owes you.
+
 ## Skills
 
 | Skill | Purpose | Output |
@@ -375,6 +447,7 @@ Claude: For each phase with unchecked tasks:
 | `/tasks` | Decompose plan + data model into phased checkbox tasks | `tasks.md` |
 | `/design` | Run designer ↔ critique loop until prototypes pass | HTML/CSS files in `designs/` |
 | `/build` | Run developer ↔ evaluator loop until every task is checked off | implemented code, ticked `tasks.md` |
+| `/extend-spec` | Fold post-build bugs, gaps, and change requests back into the spec | amended `prd.md` (+ `plan.md`/`data-model.md` when structural) + a new phase in `tasks.md` |
 
 ## Subagents
 
@@ -404,7 +477,8 @@ In the host project after `npx specsmith init`:
 │   ├── tasks/{SKILL.md, templates/tasks.md}
 │   ├── design/SKILL.md
 │   └── build/SKILL.md
-├── scripts/                      # trace hook, env-facts verifier, dev-server helper, etc.
+├── scripts/                      # trace hook, guards, run-gate, spec-status, dev-server helper, etc.
+├── specsmith/references/         # progressive-disclosure docs the agent files link to
 ├── constitution.md               # principles /plan checks against — EDIT THIS
 ├── settings.json                 # permissions + additional directories + trace hooks
 ├── launch.json                   # debug configurations
@@ -470,12 +544,22 @@ The constitution, the glossary, and your `pipeline/*.md` files are never touched
 
 **`/grill-plan` says it can't find the plan** — you're not on a feature branch. The `^\d{3}-` branch pattern is how the post-PRD skills locate the spec folder. Either `git checkout` the right branch, or tell the skill which spec folder to use when it asks.
 
+**"Refusing to re-run…" / "Refusing to re-read…" / "Refusing this edit…"** — these are the guards, working as intended. Each denial explains which pattern it caught and what to do instead, and each stands down on its own once the situation changes (an edit happened, the file was touched, a verification ran). If a guard is wrong for your project, remove its hook entry from `.claude/settings.json` — the `SPECSMITH_GUARD_OVERRIDE` env var deliberately does **not** work from inside a hook, so an agent can't talk its way past one.
+
+**A gate says `status=running` and returns nothing** — `run-gate.mjs` hit its `--wait` budget. The command is still running, detached. Re-attach with `node .claude/scripts/run-gate.mjs <gate>` (no `--`, no command); it waits on the run already in progress rather than starting a second one. Nothing is lost and nothing is re-run.
+
+**A gate replays an old result instead of running** — the working tree hasn't changed since that gate last ran, so the answer cannot differ. Pass `--force` if you believe the result was environment-dependent (a flaky test, an external service).
+
+**`/extend-spec` reports no carryovers when you expected some** — `pipeline/feedback/` is wiped at the start of every `/build` run, so a rebuild destroys the evaluator's record of what it deferred. Run `/extend-spec` before the next `/build`, not after.
+
 ## Design decisions worth knowing
 
 - **No transcript file from `/grill-me`.** The conversation context *is* the handoff, so `/write-prd` must run in the same session as `/grill-me`. The one durable thing it writes is `specs/glossary.md`: at the end of an interview it proposes a few canonical domain terms and, on your yes, appends them — building a **ubiquitous language** the whole pipeline can share. Minimal by design (one line per concept, domain terms only). `/grill-me`, `/write-prd`, and `/plan` all read it so the conversation, PRD, and plan converge on the same words; only `/grill-me` writes to it.
 - **Plan is detailed but not SpecKit-detailed.** `/plan` produces only `plan.md` + `data-model.md` — no `research.md`, `quickstart.md`, or `contracts/`. The plan template has Technical Context, Constitution Check, Project Structure, and Files-to-touch sections.
 - **Tasks are not agent-bound.** Tasks have no `(dev)` / `(design)` tags. The orchestrator routes; the evaluator decides "done".
-- **Numbering is stable.** `FR-###`, `NFR-###`, `SC-###`, `OQ-###` identifiers in `prd.md` are append-only — never renumber when adding items.
+- **Numbering is stable.** `FR-###`, `NFR-###`, `SC-###`, `OQ-###` identifiers in `prd.md` are append-only — never renumber when adding items. `scripts/spec-status.mjs` reports the next free number per prefix so `/extend-spec` never guesses; a collision would silently repoint every task, feedback file, and carryover that cited the original.
+- **Post-build work re-enters the pipeline; it does not bypass it.** `/extend-spec` amends the spec and appends tasks rather than fixing code directly, so the fix passes through the same developer → evaluator loop as the original build. It appends a new phase rather than re-opening old ones, because a ticked task is the record that an evaluator verified that behaviour in a real browser — regression coverage belongs in the new phase, not in erased history.
+- **A documented anti-pattern ships with a mechanism, or it is a comment.** Prose bans don't hold at scale. Three separate files told agents to read `run-state.md` once; the next audited run read it 24 times, up from the 10 the instruction was written to prevent. The rules that hold are the ones promoted to a guard hook or absorbed into a helper script — which is why the guards, `run-gate.mjs`, and `spec-status.mjs` exist as code rather than as more paragraphs.
 - **Each feature gets its own branch.** `/write-prd` runs `git checkout -b NNN-<slug>` off whatever branch you're on, inheriting any uncommitted changes. Multiple features in flight = multiple branches.
 
 ## License

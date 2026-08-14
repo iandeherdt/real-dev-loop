@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `npx specsmith init` is implemented (entry point at `bin/cli.mjs`). It copies everything in this repo's `agents/`, `skills/`, `scripts/`, and `templates/` into the host project's `.claude/`, merges a baseline `.claude/settings.json` (permissions, additional directories, trace hooks) and `.claude/launch.json`, drops a starter `.claude/constitution.md`, appends a "Real Dev Loop" section to the host's `CLAUDE.md`, wires the Playwright MCP server (via `claude mcp add`), and writes a checksummed manifest at `.claude/specsmith/manifest.json`. `npx specsmith update` re-syncs files that haven't been edited locally; user-modified files are skipped (manifest tracks the difference).
 
 Public surface that is a **stable contract** for downstream projects:
-- skill names (`/grill-me`, `/write-prd`, `/plan`, `/grill-plan`, `/tasks`, `/build`, `/design`)
+- skill names (`/grill-me`, `/write-prd`, `/plan`, `/grill-plan`, `/tasks`, `/build`, `/design`, `/extend-spec`)
 - the `specs/NNN-<feature-slug>/` artifact layout in host projects
 - the `specs/glossary.md` project glossary location
 - the `.claude/constitution.md` location
@@ -19,10 +19,10 @@ Internal refactors of `lib/` are fine; renaming any of the above is a breaking c
 
 ## Pipeline
 
-The skills implement a five-stage pipeline. Each feature gets its own git branch and numbered folder.
+The skills implement a staged pipeline. Each feature gets its own git branch and numbered folder. The pipeline is a loop, not a line: `/extend-spec` folds post-build findings back into the spec so `/build` can finish them the same way it finished everything else.
 
 - **Folder layout (per feature):** `specs/NNN-<feature-slug>/` at the repo root, where `NNN` is allocated sequentially (`001`, `002`, …) by `/write-prd`. Lives at the repo root (not under `.claude/`) so the artifacts are first-class team documentation, not AI scratch.
-- **Branch:** `NNN-<feature-slug>` (matches the folder name). Created by `/write-prd` off whatever branch the user is currently on, inheriting any uncommitted changes. `/plan`, `/grill-plan`, and `/tasks` each derive the spec folder by parsing the current branch name — they never create branches of their own.
+- **Branch:** `NNN-<feature-slug>` (matches the folder name). Created by `/write-prd` off whatever branch the user is currently on, inheriting any uncommitted changes. `/plan`, `/grill-plan`, `/tasks`, and `/extend-spec` each derive the spec folder by parsing the current branch name — they never create branches of their own.
 - **Constitution:** stays at `.claude/constitution.md` (project policy / AI tooling config; not per-feature).
 - **Glossary:** `specs/glossary.md` — the project's cross-feature ubiquitous language. Seeded by `init`, grown by `/grill-me`, read by it on every run. Project-wide, not per-feature, so it lives alongside the numbered folders rather than inside one.
 
@@ -35,6 +35,7 @@ The skills implement a five-stage pipeline. Each feature gets its own git branch
 | 5. Decompose | `/tasks` | `plan.md` + `data-model.md` + `prd.md` | `tasks.md` |
 | 6. Build loop | `/build` | `tasks.md` + `plan.md` + `data-model.md` | implemented code; ticks `tasks.md` |
 | 7. Design loop | `/design` | `tasks.md` + design-relevant spec | HTML/CSS prototypes under `designs/` |
+| 8. Amend after build | `/extend-spec` | bugs/gaps/change requests; last run's carryovers + `build-log.md`; `specs/glossary.md` | amended `prd.md` (+ `plan.md`/`data-model.md` when structural) + a new phase appended to `tasks.md` |
 
 `/build` and `/design` are orchestration skills that delegate to subagents — `developing-features` + `evaluating-phases` for code, `designing-interfaces` + `critiquing-designs` for prototypes (these are the `subagent_type` values; the agent files themselves are `agents/developer.md`, `agents/evaluator.md`, etc.). The evaluator (Playwright-MCP-driven) is what flips `[ ]` → `[x]` in `tasks.md`; never mark a task done on the implementer's word alone.
 
@@ -47,7 +48,8 @@ The skills implement a five-stage pipeline. Each feature gets its own git branch
 - **Plan is detailed but not SpecKit-detailed.** `/plan` produces only `plan.md` (Technical Context, Constitution Check, Project Structure, Files-to-touch) and `data-model.md`. It does **not** generate `research.md`, `quickstart.md`, or `contracts/`.
 - **Constitution lives per-project.** `.claude/constitution.md` is created by `init`, edited by the team, and read by `/plan` to render the compliance table. The skill never invents a constitution.
 - **Tasks are not agent-bound.** No `(dev)` / `(design)` tags on tasks. The orchestrator routes; the evaluator verifies.
-- **Numbering is stable.** `FR-###`, `NFR-###`, `SC-###`, `OQ-###` identifiers in `prd.md` are append-only — never renumber when adding items.
+- **Numbering is stable.** `FR-###`, `NFR-###`, `SC-###`, `OQ-###` identifiers in `prd.md` are append-only — never renumber when adding items. `scripts/spec-status.mjs` reports the next free number for each prefix so `/extend-spec` never has to guess; a collision silently repoints every task, feedback file, and carryover that cited the original.
+- **Post-build work re-enters the pipeline, it does not bypass it.** `/extend-spec` amends the spec and appends a new phase to `tasks.md` rather than fixing code directly, so the fix passes through the same developer → evaluator loop that verified the original build. It appends a phase rather than re-opening old ones because a ticked task is the record that an evaluator verified that behaviour in a browser — regression coverage belongs in the new phase, not in erased history.
 
 ## Repo layout
 

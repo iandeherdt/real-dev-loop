@@ -278,6 +278,12 @@ Verdict: [PASS — moving to next phase / FAIL — retrying with feedback / BLOC
 - Report to the user what's blocking and which issues could not be resolved
 - **`BLOCKED` is not a failure** — it is a deliberate halt for a user decision (see Step 3). Do NOT count a BLOCKED cycle toward `$MAX_CYCLES`, and do NOT re-dispatch the developer on the same phase after a BLOCKED. The /build skill exits; the user re-runs /build after the decision is made.
 
+When you halt — BLOCKED, max cycles exhausted, or a design-fidelity gap that needs `tasks.md` updated — point the user at `/extend-spec`:
+
+> `/extend-spec` records the decision in `prd.md` and appends the remaining work as a new phase, so the next `/build` resumes through the normal loop instead of being fixed by hand.
+
+This matters most right here, because `clean-run-artifacts.mjs` wipes `pipeline/feedback/` at the start of the *next* /build run. The evaluator's carryovers and the BLOCKED reason only exist until then — extending before rebuilding is what preserves them.
+
 ## Rules
 
 - **Never implement or evaluate yourself — always delegate.** This is Constitution Principle VIII (Scope Discipline) at the orchestrator level. Once you dispatch a developer or evaluator via the `Agent` tool, your scope is "wait for the return, then route the next step" — not "do the work inline while waiting". Concretely: between an `Agent` dispatch and its return, your ONLY allowed tool calls are read-only ones (Read the dispatched return, Read the feedback file the evaluator just wrote, status snapshots that don't mutate state). If you find yourself reaching for `Edit` / `Write` / `Bash` on source files mid-dispatch, stop. That's the developer's job, not yours. A real failure mode caught in the wild: orchestrator dispatched Slice A, then did Slices A-F's work itself inline, never invoked the evaluator, and committed checkboxes flipped without verification. Don't be that orchestrator.

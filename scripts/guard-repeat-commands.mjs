@@ -284,9 +284,15 @@ function main() {
         `You are looping.\n` +
         `\n` +
         `Do this instead:\n` +
-        `  1. Open the output you already have (your scrollback, or the tee file from the prior run — try \`ls /tmp/*-out.txt\`).\n` +
+        `  1. Open the output you already have — your scrollback, or the log from the\n` +
+        `     prior run at \`pipeline/traces/last-<gate>.log\` if it went through run-gate.mjs.\n` +
         `  2. Pick ONE failure. Read it carefully.\n` +
         `  3. Edit code to fix it. Once an Edit/Write happens, the guard allows a re-run.\n` +
+        `\n` +
+        `Run quality gates through the wrapper so this stops happening:\n` +
+        `  node .claude/scripts/run-gate.mjs <gate> -- <command>\n` +
+        `It keeps the real exit code, writes the full log to a fixed path you can grep\n` +
+        `for free, and replays the previous verdict when nothing has changed.\n` +
         `\n` +
         `Do NOT try to bypass this block — every variant below is detected and will also be refused:\n` +
         `  - Wrapping the command in \`node -e "…"\`, \`bash -c "…"\`, \`sh -c "…"\`, etc.\n` +
